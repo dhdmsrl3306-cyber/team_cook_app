@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -99,11 +100,113 @@ class _RootScreenState extends State<RootScreen> {
   bool isLoggedIn = false;
   String userName = "";
   String loginId = "";
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _userStatusSubscription;
 
   @override
   void initState() {
     super.initState();
     _checkAutoLogin();
+  }
+
+  void _listenToUserStatus(String id) {
+    _userStatusSubscription?.cancel();
+    _userStatusSubscription = FirebaseFirestore.instance
+        .collection('users')
+        .doc(id)
+        .snapshots()
+        .listen((snapshot) {
+      if (snapshot.exists && snapshot.data() != null) {
+        final Map<String, dynamic> data = snapshot.data()!;
+        final dynamic suspendedUntilData = data['suspendedUntil'];
+        if (suspendedUntilData != null) {
+          final DateTime suspendedUntil = (suspendedUntilData is Timestamp)
+              ? suspendedUntilData.toDate()
+              : DateTime.parse(suspendedUntilData.toString());
+          if (suspendedUntil.isAfter(DateTime.now())) {
+            _forceLogout(suspendedUntil, data['suspensionReason']?.toString() ?? '사유 미작성');
+          }
+        }
+      }
+    });
+  }
+
+  void _forceLogout(DateTime suspendedUntil, String reason) {
+    _userStatusSubscription?.cancel();
+    _userStatusSubscription = null;
+    
+    setState(() {
+      isLoggedIn = false;
+      userName = "";
+      loginId = "";
+      globalScrapList.clear();
+      _selectedIndex = 0; // 홈 화면으로 강제 이동
+    });
+
+    final String durationStr = suspendedUntil.year > 2500
+        ? '영구 정지'
+        : '${suspendedUntil.toLocal().toString().split('.').first}까지 정지';
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.red, size: 28),
+            SizedBox(width: 8),
+            Text('계정 이용 제한 안내', style: TextStyle(fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '이용 중인 계정이 운영정책 위반으로 인해 강제 로그아웃되었습니다.',
+              style: TextStyle(height: 1.4, color: Colors.black87),
+            ),
+            const SizedBox(height: 16),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.grey.shade200),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('제한 기간', style: TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 4),
+                  Text(durationStr, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.red)),
+                  const SizedBox(height: 12),
+                  const Text('제한 사유', style: TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 4),
+                  Text(reason, style: const TextStyle(fontSize: 14, color: Colors.black87)),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          Center(
+            child: SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: () => Navigator.pop(context),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.deepOrange,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+                child: const Text('확인', style: TextStyle(color: Colors.white)),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> onLoginSuccess(String name, String id) async {
@@ -112,6 +215,9 @@ class _RootScreenState extends State<RootScreen> {
       userName = name;
       loginId = id;
     });
+
+    _listenToUserStatus(id);
+
     var userDoc = await FirebaseFirestore.instance
         .collection('users')
         .doc(id)
@@ -128,6 +234,12 @@ class _RootScreenState extends State<RootScreen> {
     }
   }
 
+  @override
+  void dispose() {
+    _userStatusSubscription?.cancel();
+    super.dispose();
+  }
+
   Future<void> _checkAutoLogin() async {
     User? user = FirebaseAuth.instance.currentUser;
     if (user != null) {
@@ -135,11 +247,25 @@ class _RootScreenState extends State<RootScreen> {
           .collection('users')
           .doc(user.uid)
           .get();
-      String name = "사용자";
-      if (userDoc.exists) {
-        name = userDoc.data()?['name'] ?? "사용자";
+      if (userDoc.exists && userDoc.data() != null) {
+        final Map<String, dynamic> data = userDoc.data()!;
+        final dynamic suspendedUntilData = data['suspendedUntil'];
+        if (suspendedUntilData != null) {
+          final DateTime suspendedUntil = (suspendedUntilData is Timestamp)
+              ? suspendedUntilData.toDate()
+              : DateTime.parse(suspendedUntilData.toString());
+          if (suspendedUntil.isAfter(DateTime.now())) {
+            // 정지된 사용자이므로 자동 로그인 방지 및 로그아웃
+            await FirebaseAuth.instance.signOut();
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              _forceLogout(suspendedUntil, data['suspensionReason']?.toString() ?? '사유 미작성');
+            });
+            return;
+          }
+        }
+        String name = data['nickname'] ?? data['name'] ?? "사용자";
+        await onLoginSuccess(name, user.uid);
       }
-      await onLoginSuccess(name, user.uid);
     }
   }
 
@@ -162,6 +288,8 @@ class _RootScreenState extends State<RootScreen> {
           ),
         ),
         onLogout: () => setState(() {
+          _userStatusSubscription?.cancel();
+          _userStatusSubscription = null;
           isLoggedIn = false;
           userName = "";
           loginId = "";
@@ -219,72 +347,59 @@ class _HomeScreenState extends State<HomeScreen> {
   Timer? _bannerTimer;
   int _bannerPage = 0;
   List<Map<String, dynamic>> _bannerRecipes = [];
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _bannerSubscription;
 
-@override
-void initState() {
-  super.initState();
-  _loadBannerRecipes().then((_){
-    if (mounted) {
-      _startBannerTimer();
-    }
-  });
-}
-
-// 타이머 시작 함수
-void _startBannerTimer() {
-  _bannerTimer = Timer.periodic(const Duration(seconds: 4), (timer) {
-    if (_bannerRecipes.isNotEmpty && _bannerController.hasClients) {
-      int nextPage = (_bannerPage + 1) % _bannerRecipes.length;
-      _bannerController.animateToPage(
-        nextPage,
-        duration: const Duration(milliseconds: 500),
-        curve: Curves.easeInOut,
-      );
-    }
-  });
-}
-
-@override
-void dispose() {
-  _bannerTimer?.cancel(); // 페이지 종료 시 타이머 해제 (중요!)
-  _bannerController.dispose();
-  super.dispose();
-}
-
-  // 예시용 로드 함수 (실제 환경에 맞게 수정하여 사용하세요)
-Future<void> _loadBannerRecipes() async {
-  try {
-    // 1. 추천 관리 컬렉션에서 'today' 문서 가져오기
-    DocumentSnapshot meta = await FirebaseFirestore.instance
-        .collection('daily_recommendations')
-        .doc('today')
-        .get();
-
-    // 2. 문서가 존재하고 today_ids 배열이 있는지 확인
-    if (meta.exists && meta.data() != null) {
-      Map<String, dynamic> data = meta.data() as Map<String, dynamic>;
-      List<dynamic> ids = data['today_ids'] ?? [];
-
-      if (ids.isNotEmpty) {
-        // 3. 해당 ID 리스트에 있는 레시피만 가져오기
-        QuerySnapshot snapshot = await FirebaseFirestore.instance
-            .collection('recipes')
-            .where(FieldPath.documentId, whereIn: ids)
-            .get();
-
-        if (mounted) {
-          setState(() {
-            _bannerRecipes = snapshot.docs
-                .map((doc) => {'id': doc.id, ...doc.data() as Map<String, dynamic>})
-                .toList();
-          });
+  @override
+  void initState() {
+    super.initState();
+    // recipe_list 컬렉션을 실시간으로 구독하여 최신 레시피 5개를 배너 레시피로 설정
+    _bannerSubscription = _recipesRef
+        .orderBy('createdAt', descending: true)
+        .limit(5)
+        .snapshots()
+        .listen((snapshot) {
+      if (mounted) {
+        setState(() {
+          _bannerRecipes = snapshot.docs
+              .map((doc) => {'id': doc.id, ...doc.data()})
+              .toList();
+          // 배너 개수가 변경되었을 때 현재 페이지 번호 범위를 보정
+          if (_bannerPage >= _bannerRecipes.length) {
+            _bannerPage = 0;
+            if (_bannerController.hasClients) {
+              _bannerController.jumpToPage(0);
+            }
+          }
+        });
+        // 타이머가 시작되지 않았고 레시피가 있다면 타이머 작동 시작
+        if (_bannerTimer == null && _bannerRecipes.isNotEmpty) {
+          _startBannerTimer();
         }
       }
-    }
-  } catch (e) {
-    debugPrint("추천 레시피 로드 실패: $e");
+    });
   }
-}
+
+  // 타이머 시작 함수
+  void _startBannerTimer() {
+    _bannerTimer = Timer.periodic(const Duration(seconds: 4), (timer) {
+      if (_bannerRecipes.isNotEmpty && _bannerController.hasClients) {
+        int nextPage = (_bannerPage + 1) % _bannerRecipes.length;
+        _bannerController.animateToPage(
+          nextPage,
+          duration: const Duration(milliseconds: 500),
+          curve: Curves.easeInOut,
+        );
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _bannerSubscription?.cancel(); // 스트림 해제 (중요!)
+    _bannerTimer?.cancel(); // 타이머 해제
+    _bannerController.dispose(); // 컨트롤러 해제
+    super.dispose();
+  }
 
   Future<void> _toggleScrap(Map<String, dynamic> recipe) async {
     if (!widget.isLoggedIn) {
@@ -379,7 +494,31 @@ Future<void> _loadBannerRecipes() async {
   }
 
   Widget _buildRecommendBanner() {
-    if (_bannerRecipes.isEmpty) return const SizedBox(height: 350);
+    if (_bannerRecipes.isEmpty) {
+      return Container(
+        height: 200,
+        margin: const EdgeInsets.symmetric(horizontal: 20),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade100,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.grey.shade200),
+        ),
+        child: const Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.restaurant_menu, size: 40, color: Colors.grey),
+              SizedBox(height: 10),
+              Text(
+                '추천 레시피가 없습니다.\n첫 레시피를 등록해보세요!',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.grey, fontSize: 14),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
     return Column(
       children: [
         SizedBox(
@@ -409,6 +548,12 @@ Future<void> _loadBannerRecipes() async {
 
   Widget _bannerCard(Map<String, dynamic> recipe) {
     bool isScrapped = globalScrapList.any((item) => item['recipe_food'] == recipe['recipe_food']);
+    final imgUrl = (recipe['imageUrl'] != null && recipe['imageUrl'].toString().trim().isNotEmpty)
+        ? recipe['imageUrl'].toString().trim()
+        : ((recipe['url'] != null && recipe['url'].toString().trim().isNotEmpty)
+            ? recipe['url'].toString().trim()
+            : 'https://picsum.photos/400/300');
+
     return GestureDetector(
       onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => RecipeDetailScreen(recipe: recipe, currentUserId: widget.loginId, isLoggedIn: widget.isLoggedIn))),
       child: Container(
@@ -419,7 +564,18 @@ Future<void> _loadBannerRecipes() async {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              Image.network(recipe['imageUrl'] ?? recipe['url'] ?? 'https://picsum.photos/400/300', fit: BoxFit.cover),
+              Image.network(
+                imgUrl,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) {
+                  return Container(
+                    color: Colors.grey.shade100,
+                    child: const Center(
+                      child: Icon(Icons.broken_image, color: Colors.grey, size: 40),
+                    ),
+                  );
+                },
+              ),
               Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.transparent, Colors.black.withOpacity(0.55)]))),
               Positioned(left: 16, right: 16, bottom: 16, child: Text(recipe['recipe_food']?.toString() ?? '', style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))),
               Positioned(top: 10, right: 10, child: GestureDetector(onTap: () => _toggleScrap(recipe), child: Icon(isScrapped ? Icons.favorite : Icons.favorite_border, color: isScrapped ? Colors.red : Colors.white, size: 28))),
@@ -432,6 +588,12 @@ Future<void> _loadBannerRecipes() async {
 
   Widget _recipeCard(BuildContext context, Map<String, dynamic> recipe) {
     bool isScrapped = globalScrapList.any((item) => item['recipe_food'] == recipe['recipe_food']);
+    final imgUrl = (recipe['imageUrl'] != null && recipe['imageUrl'].toString().trim().isNotEmpty)
+        ? recipe['imageUrl'].toString().trim()
+        : ((recipe['url'] != null && recipe['url'].toString().trim().isNotEmpty)
+            ? recipe['url'].toString().trim()
+            : 'https://picsum.photos/400/300');
+
     return InkWell(
       onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => RecipeDetailScreen(recipe: recipe, currentUserId: widget.loginId, isLoggedIn: widget.isLoggedIn))),
       child: Column(
@@ -440,7 +602,23 @@ Future<void> _loadBannerRecipes() async {
           Expanded(
             child: Stack(
               children: [
-                ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.network(recipe['imageUrl'] ?? recipe['url'] ?? 'https://picsum.photos/400/300', fit: BoxFit.cover, width: double.infinity)),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: Image.network(
+                    imgUrl,
+                    fit: BoxFit.cover,
+                    width: double.infinity,
+                    height: double.infinity,
+                    errorBuilder: (context, error, stackTrace) {
+                      return Container(
+                        color: Colors.grey.shade100,
+                        child: const Center(
+                          child: Icon(Icons.broken_image, color: Colors.grey, size: 24),
+                        ),
+                      );
+                    },
+                  ),
+                ),
                 Positioned(top: 5, right: 5, child: GestureDetector(onTap: () => _toggleScrap(recipe), child: Icon(isScrapped ? Icons.favorite : Icons.favorite_border, color: isScrapped ? Colors.red : Colors.white, size: 20))),
               ],
             ),
@@ -966,10 +1144,7 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
     TextEditingController(),
     TextEditingController(),
   ];
-  final List<TextEditingController> _stepTimeControllers = [
-    TextEditingController(),
-    TextEditingController(),
-  ];
+  final List<int> _stepSeconds = [0, 0];
 
   @override
   void initState() {
@@ -1033,21 +1208,15 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
 
         if (stepsList.isNotEmpty) {
           for (final c in _stepDescControllers) c.dispose();
-          for (final c in _stepTimeControllers) c.dispose();
           _stepDescControllers.clear();
-          _stepTimeControllers.clear();
+          _stepSeconds.clear();
 
           for (final step in stepsList) {
             var desc = step['desc']?.toString() ?? '';
             desc = desc.replaceFirst(RegExp(r'^\d+\.\s*'), '');
             final timeSeconds = step['time'] ?? 0;
-            final minutes = (timeSeconds as int) ~/ 60;
             _stepDescControllers.add(TextEditingController(text: desc));
-            _stepTimeControllers.add(
-              TextEditingController(
-                text: minutes > 0 ? minutes.toString() : '',
-              ),
-            );
+            _stepSeconds.add(timeSeconds as int);
           }
         }
       }
@@ -1063,14 +1232,13 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
     _servingsController.dispose();
     _ingredientsController.dispose();
     for (final c in _stepDescControllers) c.dispose();
-    for (final c in _stepTimeControllers) c.dispose();
     super.dispose();
   }
 
   void _addStep() {
     setState(() {
       _stepDescControllers.add(TextEditingController());
-      _stepTimeControllers.add(TextEditingController());
+      _stepSeconds.add(0);
     });
   }
 
@@ -1078,10 +1246,23 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
     if (_stepDescControllers.length <= 1) return;
     setState(() {
       _stepDescControllers[index].dispose();
-      _stepTimeControllers[index].dispose();
       _stepDescControllers.removeAt(index);
-      _stepTimeControllers.removeAt(index);
+      _stepSeconds.removeAt(index);
     });
+  }
+
+  String _formatDuration(int totalSeconds) {
+    final m = totalSeconds ~/ 60;
+    final s = totalSeconds % 60;
+    if (m > 0 && s > 0) {
+      return '$m분 $s초';
+    } else if (m > 0) {
+      return '$m분';
+    } else if (s > 0) {
+      return '$s초';
+    } else {
+      return '0초';
+    }
   }
 
   Future<void> _submit() async {
@@ -1097,8 +1278,8 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
     for (var i = 0; i < _stepDescControllers.length; i++) {
       final desc = _stepDescControllers[i].text.trim();
       if (desc.isEmpty) continue;
-      final minutes = int.tryParse(_stepTimeControllers[i].text.trim()) ?? 0;
-      stepItems.add({'desc': desc, 'time': minutes * 60});
+      final seconds = _stepSeconds[i];
+      stepItems.add({'desc': desc, 'time': seconds});
     }
 
     if (ingredients.isEmpty || stepItems.isEmpty) {
@@ -1295,11 +1476,78 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
                           v == null || v.trim().isEmpty ? '설명을 입력해주세요.' : null,
                     ),
                     const SizedBox(height: 8),
-                    TextFormField(
-                      controller: _stepTimeControllers[index],
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
-                        labelText: '타이머 설정 (분, 선택)',
+                    InkWell(
+                      onTap: () async {
+                        Duration? selectedDuration = await showModalBottomSheet<Duration>(
+                          context: context,
+                          builder: (BuildContext context) {
+                            Duration tempDuration = Duration(seconds: _stepSeconds[index]);
+                            return Container(
+                              height: 300,
+                              color: Colors.white,
+                              child: Column(
+                                children: [
+                                  Container(
+                                    height: 50,
+                                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                                    decoration: BoxDecoration(
+                                      border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
+                                    ),
+                                    child: Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        TextButton(
+                                          onPressed: () => Navigator.pop(context),
+                                          child: const Text('취소', style: TextStyle(color: Colors.grey, fontSize: 16)),
+                                        ),
+                                        TextButton(
+                                          onPressed: () => Navigator.pop(context, tempDuration),
+                                          child: const Text('확인', style: TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 16)),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  Expanded(
+                                    child: CupertinoTimerPicker(
+                                      mode: CupertinoTimerPickerMode.ms,
+                                      initialTimerDuration: tempDuration,
+                                      onTimerDurationChanged: (Duration duration) {
+                                        tempDuration = duration;
+                                      },
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        );
+                        if (selectedDuration != null) {
+                          setState(() {
+                            _stepSeconds[index] = selectedDuration.inSeconds;
+                          });
+                        }
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+                        margin: const EdgeInsets.symmetric(vertical: 8),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.grey.shade300),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              _stepSeconds[index] > 0
+                                  ? '타이머 설정됨: ${_formatDuration(_stepSeconds[index])}'
+                                  : '타이머 설정 (분/초 선택, 선택사항)',
+                              style: TextStyle(
+                                color: _stepSeconds[index] > 0 ? Colors.black87 : Colors.grey.shade600,
+                              ),
+                            ),
+                            const Icon(Icons.timer_outlined, color: Colors.deepOrange),
+                          ],
+                        ),
                       ),
                     ),
                     if (_stepDescControllers.length > 1)
@@ -1604,6 +1852,9 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
   bool _isEditingReview = false;
   String? _editingReviewId;
   Map<String, dynamic>? _editingReview;
+  String? _replyingParentId;
+  String? _editingReplyId;
+  final TextEditingController _replyController = TextEditingController();
 
   CollectionReference<Map<String, dynamic>> get _reviewsRef {
     final recipeId = widget.recipe['id']?.toString();
@@ -1793,6 +2044,76 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
     });
   }
 
+  Future<void> _submitReply(String parentId, String content) async {
+    if (!_isLoggedIn) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('로그인 후 이용해주세요.')),
+      );
+      return;
+    }
+    if (content.trim().isEmpty) return;
+
+    final replyRef = _reviewsRef.doc();
+    final replyData = {
+      'authorId': widget.currentUserId,
+      'authorName': widget.currentUserId,
+      'content': content.trim(),
+      'parentId': parentId,
+      'createdAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
+
+    await replyRef.set(replyData);
+
+    final recipeId = widget.recipe['id']?.toString();
+    if (recipeId != null && recipeId.isNotEmpty) {
+      final recipeRef = FirebaseFirestore.instance.collection('recipe_list').doc(recipeId);
+      await FirebaseFirestore.instance.runTransaction((transaction) async {
+        DocumentSnapshot recipeSnap = await transaction.get(recipeRef);
+        if (recipeSnap.exists) {
+          final data = recipeSnap.data() as Map<String, dynamic>?;
+          final currentReviewCount = data?['reviewCount'] is int ? data!['reviewCount'] as int : 0;
+          transaction.update(recipeRef, {'reviewCount': currentReviewCount + 1});
+          if (mounted) {
+            setState(() {
+              widget.recipe['reviewCount'] = currentReviewCount + 1;
+            });
+          }
+        }
+      });
+    }
+  }
+
+  Future<void> _updateReply(String replyId, String text) async {
+    await _reviewsRef.doc(replyId).update({
+      'content': text,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> _deleteReply(String replyId) async {
+    await _reviewsRef.doc(replyId).delete();
+
+    final recipeId = widget.recipe['id']?.toString();
+    if (recipeId != null && recipeId.isNotEmpty) {
+      final recipeRef = FirebaseFirestore.instance.collection('recipe_list').doc(recipeId);
+      await FirebaseFirestore.instance.runTransaction((transaction) async {
+        DocumentSnapshot recipeSnap = await transaction.get(recipeRef);
+        if (recipeSnap.exists) {
+          final data = recipeSnap.data() as Map<String, dynamic>?;
+          final currentReviewCount = data?['reviewCount'] is int ? data!['reviewCount'] as int : 0;
+          final newReviewCount = currentReviewCount > 0 ? currentReviewCount - 1 : 0;
+          transaction.update(recipeRef, {'reviewCount': newReviewCount});
+          if (mounted) {
+            setState(() {
+              widget.recipe['reviewCount'] = newReviewCount;
+            });
+          }
+        }
+      });
+    }
+  }
+
   Widget _buildReviewStars({
     required int rating,
     required void Function(int) onChanged,
@@ -1862,15 +2183,44 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
           ),
           const SizedBox(height: 10),
           Text(content, style: const TextStyle(fontSize: 15, height: 1.4)),
-          if (authorId == widget.currentUserId) ...[
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                TextButton(
-                  onPressed: () => _startEditingReview(review, reviewId),
-                  child: const Text('수정'),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              TextButton.icon(
+                onPressed: () {
+                  if (!_isLoggedIn) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('로그인 후 답글을 남길 수 있습니다.')),
+                    );
+                    return;
+                  }
+                  setState(() {
+                    if (_replyingParentId == reviewId && _editingReplyId == null) {
+                      _replyingParentId = null;
+                    } else {
+                      _replyingParentId = reviewId;
+                      _editingReplyId = null;
+                      _replyController.clear();
+                    }
+                  });
+                },
+                icon: const Icon(Icons.reply, size: 16, color: Colors.grey),
+                label: Text(
+                  _replyingParentId == reviewId && _editingReplyId == null ? '답글 취소' : '답글',
+                  style: const TextStyle(color: Colors.grey, fontSize: 13),
                 ),
-                TextButton(
+              ),
+              if (authorId == widget.currentUserId) ...[
+                const SizedBox(width: 8),
+                TextButton.icon(
+                  onPressed: () => _startEditingReview(review, reviewId),
+                  icon: const Icon(Icons.edit, size: 16, color: Colors.grey),
+                  label: const Text('수정', style: TextStyle(color: Colors.grey, fontSize: 13)),
+                ),
+              ],
+              if (authorId == widget.currentUserId || widget.currentUserId == 'admin') ...[
+                const SizedBox(width: 8),
+                TextButton.icon(
                   onPressed: () async {
                     final confirmed = await showDialog<bool>(
                       context: context,
@@ -1884,20 +2234,197 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                           ),
                           TextButton(
                             onPressed: () => Navigator.pop(context, true),
-                            child: const Text(
-                              '삭제',
-                              style: TextStyle(color: Colors.red),
-                            ),
+                            child: const Text('삭제', style: TextStyle(color: Colors.red)),
                           ),
                         ],
                       ),
                     );
-                    if (confirmed == true)
+                    if (confirmed == true) {
                       await _deleteReview(reviewId, rating);
+                    }
                   },
-                  child: const Text('삭제', style: TextStyle(color: Colors.red)),
+                  icon: const Icon(Icons.delete_outline, size: 16, color: Colors.redAccent),
+                  label: const Text('삭제', style: TextStyle(color: Colors.redAccent, fontSize: 13)),
                 ),
               ],
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReplyInputField(String parentId, {String? editingReplyId}) {
+    final isEditing = editingReplyId != null;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade50,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          TextField(
+            controller: _replyController,
+            maxLines: 2,
+            decoration: InputDecoration(
+              hintText: isEditing ? '답글을 수정해 주세요.' : '답글을 입력해 주세요.',
+              hintStyle: const TextStyle(fontSize: 14, color: Colors.grey),
+              border: InputBorder.none,
+            ),
+            style: const TextStyle(fontSize: 14),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              TextButton(
+                onPressed: () {
+                  setState(() {
+                    _replyingParentId = null;
+                    _editingReplyId = null;
+                    _replyController.clear();
+                  });
+                },
+                child: const Text('취소', style: TextStyle(color: Colors.grey, fontSize: 13)),
+              ),
+              const SizedBox(width: 8),
+              ElevatedButton(
+                onPressed: () async {
+                  final text = _replyController.text.trim();
+                  if (text.isEmpty) return;
+
+                  if (isEditing) {
+                    await _updateReply(editingReplyId, text);
+                  } else {
+                    await _submitReply(parentId, text);
+                  }
+
+                  setState(() {
+                    _replyingParentId = null;
+                    _editingReplyId = null;
+                    _replyController.clear();
+                  });
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.deepOrange,
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: Text(
+                  isEditing ? '수정 완료' : '등록',
+                  style: const TextStyle(fontSize: 13, color: Colors.white),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReplyCard(Map<String, dynamic> reply, String replyId, String parentId) {
+    final authorId = reply['authorId']?.toString() ?? '';
+    final authorName = reply['authorName']?.toString() ?? authorId;
+    final content = reply['content']?.toString() ?? '';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade50,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade100),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.subdirectory_arrow_right, size: 16, color: Colors.grey),
+              const SizedBox(width: 6),
+              CircleAvatar(
+                radius: 12,
+                backgroundColor: Colors.orange.shade200,
+                child: Text(
+                  authorName.isNotEmpty ? authorName[0].toUpperCase() : '?',
+                  style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  authorName,
+                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Padding(
+            padding: const EdgeInsets.only(left: 22),
+            child: Text(content, style: const TextStyle(fontSize: 14, height: 1.4, color: Colors.black87)),
+          ),
+          if (authorId == widget.currentUserId || widget.currentUserId == 'admin') ...[
+            const SizedBox(height: 6),
+            Padding(
+              padding: const EdgeInsets.only(left: 22),
+              child: Row(
+                children: [
+                  if (authorId == widget.currentUserId)
+                    TextButton.icon(
+                      onPressed: () {
+                        setState(() {
+                          _replyingParentId = parentId;
+                          _editingReplyId = replyId;
+                          _replyController.text = content;
+                        });
+                      },
+                      icon: const Icon(Icons.edit, size: 14, color: Colors.grey),
+                      label: const Text('수정', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                      style: TextButton.styleFrom(
+                        padding: EdgeInsets.zero,
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                    ),
+                  if (authorId == widget.currentUserId) const SizedBox(width: 12),
+                  TextButton.icon(
+                    onPressed: () async {
+                      final confirmed = await showDialog<bool>(
+                        context: context,
+                        builder: (context) => AlertDialog(
+                          title: const Text('답글 삭제'),
+                          content: const Text('정말 이 답글을 삭제하시겠습니까?'),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(context, false),
+                              child: const Text('취소'),
+                            ),
+                            TextButton(
+                              onPressed: () => Navigator.pop(context, true),
+                              child: const Text('삭제', style: TextStyle(color: Colors.red)),
+                            ),
+                          ],
+                        ),
+                      );
+                      if (confirmed == true) {
+                        await _deleteReply(replyId);
+                      }
+                    },
+                    icon: const Icon(Icons.delete_outline, size: 14, color: Colors.redAccent),
+                    label: const Text('삭제', style: TextStyle(color: Colors.redAccent, fontSize: 12)),
+                    style: TextButton.styleFrom(
+                      padding: EdgeInsets.zero,
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ],
         ],
@@ -1940,6 +2467,7 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
   void dispose() {
     _timer?.cancel();
     _reviewController.dispose();
+    _replyController.dispose();
     super.dispose();
   }
 
@@ -1952,6 +2480,7 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
     );
     final bool isOwner =
         _isLoggedIn && widget.recipe['ownerId'] == widget.currentUserId;
+    final bool isAdmin = _isLoggedIn && widget.currentUserId == 'admin';
 
     return Scaffold(
       backgroundColor: Colors.grey.shade50,
@@ -1973,7 +2502,7 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                     ),
                     onPressed: _toggleScrap,
                   ),
-                  if (isOwner) ...[
+                  if (isOwner)
                     IconButton(
                       icon: const Icon(Icons.edit, color: Colors.deepOrange),
                       onPressed: () async {
@@ -1994,6 +2523,7 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                         }
                       },
                     ),
+                  if (isOwner || isAdmin)
                     IconButton(
                       icon: const Icon(Icons.delete, color: Colors.redAccent),
                       onPressed: () async {
@@ -2038,7 +2568,6 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                         }
                       },
                     ),
-                  ],
                 ],
                 flexibleSpace: FlexibleSpaceBar(
                   title: Text(
@@ -2192,12 +2721,52 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                               ),
                             );
                           }
+
+                          final allItems = docs.map((doc) => {'id': doc.id, ...doc.data()}).toList();
+                          final parentReviews = allItems.where((item) => item['parentId'] == null).toList();
+                          final replies = allItems.where((item) => item['parentId'] != null).toList();
+
                           return Column(
-                            children: docs
-                                .map(
-                                  (doc) => _buildReviewCard(doc.data(), doc.id),
-                                )
-                                .toList(),
+                            children: parentReviews.map((parent) {
+                              final parentId = parent['id'] as String;
+                              final parentReplies = replies
+                                  .where((r) => r['parentId'] == parentId)
+                                  .toList()
+                                ..sort((a, b) {
+                                  final aTime = a['createdAt'] as Timestamp?;
+                                  final bTime = b['createdAt'] as Timestamp?;
+                                  if (aTime == null || bTime == null) return 0;
+                                  return aTime.compareTo(bTime);
+                                });
+
+                              return Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  _buildReviewCard(parent, parentId),
+                                  if (_replyingParentId == parentId && _editingReplyId == null)
+                                    Padding(
+                                      padding: const EdgeInsets.only(left: 32, right: 16, bottom: 12),
+                                      child: _buildReplyInputField(parentId),
+                                    ),
+                                  if (parentReplies.isNotEmpty)
+                                    Padding(
+                                      padding: const EdgeInsets.only(left: 32, bottom: 8),
+                                      child: Column(
+                                        children: parentReplies.map((reply) {
+                                          final replyId = reply['id'] as String;
+                                          if (_replyingParentId == parentId && _editingReplyId == replyId) {
+                                            return Padding(
+                                              padding: const EdgeInsets.symmetric(vertical: 8),
+                                              child: _buildReplyInputField(parentId, editingReplyId: replyId),
+                                            );
+                                          }
+                                          return _buildReplyCard(reply, replyId, parentId);
+                                        }).toList(),
+                                      ),
+                                    ),
+                                ],
+                              );
+                            }).toList(),
                           );
                         },
                       ),
@@ -2902,6 +3471,21 @@ class _LoginScreenState extends State<LoginScreen> {
       final userDoc = snapshot.docs.first;
       final dbPassword = userDoc['password'];
       if (dbPassword == pw) {
+        final Map<String, dynamic> userData = userDoc.data() as Map<String, dynamic>;
+        final dynamic suspendedUntilData = userData['suspendedUntil'];
+        if (suspendedUntilData != null) {
+          final DateTime suspendedUntil = (suspendedUntilData is Timestamp)
+              ? suspendedUntilData.toDate()
+              : DateTime.parse(suspendedUntilData.toString());
+          if (suspendedUntil.isAfter(DateTime.now())) {
+            final String durationStr = suspendedUntil.year > 2500
+                ? '영구 정지'
+                : '${suspendedUntil.toLocal().toString().split('.').first}까지 정지';
+            final String reason = userData['suspensionReason']?.toString() ?? '사유 미작성';
+            _showSuspensionCenterDialog(durationStr, reason);
+            return;
+          }
+        }
         final nickname = userDoc['nickname'];
         widget.onLoginSuccess(nickname, id);
         _showSnackBar('$nickname님, 환영합니다! 🎉', Colors.green);
@@ -2911,6 +3495,70 @@ class _LoginScreenState extends State<LoginScreen> {
     } catch (e) {
       _showSnackBar('로그인 중 오류 발생: $e', Colors.red);
     }
+  }
+
+  void _showSuspensionCenterDialog(String durationStr, String reason) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.red, size: 28),
+            SizedBox(width: 8),
+            Text('계정 이용 제한 안내', style: TextStyle(fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '해당 계정은 운영정책 위반으로 인해 서비스 이용이 일시적으로 제한되었습니다.',
+              style: TextStyle(height: 1.4, color: Colors.black87),
+            ),
+            const SizedBox(height: 16),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.grey.shade200),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('제한 기간', style: TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 4),
+                  Text(durationStr, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.red)),
+                  const SizedBox(height: 12),
+                  const Text('제한 사유', style: TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 4),
+                  Text(reason, style: const TextStyle(fontSize: 14, color: Colors.black87)),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          Center(
+            child: SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: () => Navigator.pop(context),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.deepOrange,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+                child: const Text('확인', style: TextStyle(color: Colors.white)),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   void _showSnackBar(String msg, Color color) {
@@ -3622,7 +4270,7 @@ class _AdminUserListScreenState extends State<AdminUserListScreen> {
   }
 }
 
-class AdminUserDetailScreen extends StatelessWidget {
+class AdminUserDetailScreen extends StatefulWidget {
   final String userId;
   final Map<String, dynamic> userData;
 
@@ -3633,15 +4281,164 @@ class AdminUserDetailScreen extends StatelessWidget {
   });
 
   @override
+  State<AdminUserDetailScreen> createState() => _AdminUserDetailScreenState();
+}
+
+class _AdminUserDetailScreenState extends State<AdminUserDetailScreen> {
+  late String _status;
+  DateTime? _suspendedUntil;
+
+  @override
+  void initState() {
+    super.initState();
+    _status = widget.userData['user_status'] ?? 'active';
+    final suspendedVal = widget.userData['suspendedUntil'];
+    if (suspendedVal != null) {
+      _suspendedUntil = (suspendedVal is Timestamp)
+          ? suspendedVal.toDate()
+          : DateTime.tryParse(suspendedVal.toString());
+    }
+  }
+
+  Future<void> _updateSuspension(String newStatus, DateTime? until, String? reason) async {
+    try {
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(widget.userId)
+          .update({
+        'user_status': newStatus,
+        'suspendedUntil': until != null ? Timestamp.fromDate(until) : null,
+        'suspensionReason': reason,
+      });
+
+      setState(() {
+        _status = newStatus;
+        _suspendedUntil = until;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('계정 상태가 업데이트되었습니다.')),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('상태 업데이트 실패: $e')),
+      );
+    }
+  }
+
+  Future<void> _promptSuspensionReason(String status, DateTime until) async {
+    final TextEditingController reasonController = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('정지 사유 입력'),
+        content: TextField(
+          controller: reasonController,
+          decoration: const InputDecoration(
+            hintText: '정지 사유를 입력하세요 (예: 비방 댓글 작성)',
+            border: OutlineInputBorder(),
+          ),
+          maxLines: 3,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('취소', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (reasonController.text.trim().isEmpty) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('사유를 입력해 주세요.')),
+                );
+                return;
+              }
+              Navigator.pop(context, true);
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange),
+            child: const Text('확인', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      await _updateSuspension(status, until, reasonController.text.trim());
+    }
+  }
+
+  void _showSuspensionDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('계정 정지 설정'),
+        content: const Text('정지 기간을 선택하세요.'),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _updateSuspension('active', null, null);
+            },
+            child: const Text('정상 상태로 해제 (Active)', style: TextStyle(color: Colors.green)),
+          ),
+          const Divider(),
+          ListTile(
+            title: const Text('1일 정지'),
+            onTap: () {
+              Navigator.pop(context);
+              _promptSuspensionReason('suspended', DateTime.now().add(const Duration(days: 1)));
+            },
+          ),
+          ListTile(
+            title: const Text('3일 정지'),
+            onTap: () {
+              Navigator.pop(context);
+              _promptSuspensionReason('suspended', DateTime.now().add(const Duration(days: 3)));
+            },
+          ),
+          ListTile(
+            title: const Text('7일 정지'),
+            onTap: () {
+              Navigator.pop(context);
+              _promptSuspensionReason('suspended', DateTime.now().add(const Duration(days: 7)));
+            },
+          ),
+          ListTile(
+            title: const Text('영구 정지'),
+            onTap: () {
+              Navigator.pop(context);
+              _promptSuspensionReason('suspended', DateTime(3000, 1, 1));
+            },
+          ),
+          const Divider(),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('취소', style: TextStyle(color: Colors.grey)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _getSuspensionStatusText() {
+    if (_status == 'suspended' && _suspendedUntil != null && _suspendedUntil!.isAfter(DateTime.now())) {
+      if (_suspendedUntil!.year > 2500) {
+        return '정지됨 (영구 정지)';
+      }
+      return '정지됨 (${_suspendedUntil!.toLocal().toString().split('.').first}까지)';
+    }
+    return '정상 (Active)';
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final name = userData['nickname'] ?? '정보 없음';
-    final loginIdField = userData['login_id'] ?? '정보 없음';
-    final role = userData['role'] ?? 'user';
-    final status = userData['user_status'] ?? 'active';
-    final email = userData['email'] ?? '정보 없음';
-    final createdAt = userData['createdAt'] is Timestamp
-        ? (userData['createdAt'] as Timestamp).toDate().toString()
-        : userData['createdAt']?.toString() ?? '정보 없음';
+    final name = widget.userData['nickname'] ?? '정보 없음';
+    final loginIdField = widget.userData['login_id'] ?? '정보 없음';
+    final role = widget.userData['role'] ?? 'user';
+    final email = widget.userData['email'] ?? '정보 없음';
+    final createdAt = widget.userData['createdAt'] is Timestamp
+        ? (widget.userData['createdAt'] as Timestamp).toDate().toString()
+        : widget.userData['createdAt']?.toString() ?? '정보 없음';
 
     return Scaffold(
       appBar: AppBar(
@@ -3666,13 +4463,26 @@ class AdminUserDetailScreen extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 15),
-            _buildInfoRow('파이어베이스 문서 ID', userId),
+            _buildInfoRow('파이어베이스 문서 ID', widget.userId),
             _buildInfoRow('로그인 ID', loginIdField),
             _buildInfoRow('닉네임 (이름)', name),
             _buildInfoRow('이메일 주소', email),
             _buildInfoRow('계정 권한', role),
-            _buildInfoRow('계정 상태', status),
+            _buildInfoRow('계정 상태', _getSuspensionStatusText()),
             _buildInfoRow('가입 일시', createdAt),
+            const SizedBox(height: 20),
+            ElevatedButton.icon(
+              onPressed: _showSuspensionDialog,
+              icon: const Icon(Icons.block_flipped),
+              label: const Text('계정 정지 및 상태 변경'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _status == 'suspended' && _suspendedUntil != null && _suspendedUntil!.isAfter(DateTime.now())
+                    ? Colors.red
+                    : Colors.deepOrange,
+                foregroundColor: Colors.white,
+                minimumSize: const Size(double.infinity, 45),
+              ),
+            ),
             const SizedBox(height: 30),
             const Text(
               '활동 내역 관리',
