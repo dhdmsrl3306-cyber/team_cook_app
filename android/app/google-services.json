@@ -1,0 +1,82 @@
+{
+  "project_info": {
+    "project_number": "203535497666",
+    "project_id": "cook-manager-5b78f",
+    "storage_bucket": "cook-manager-5b78f.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:203535497666:android:391ec155dcc5aef861fe5b",
+        "android_client_info": {
+          "package_name": "com.company.cookmanager"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "203535497666-39gina0jcokvkaihrfpl54r0sqrqomlk.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB1hWu72ocbG-dlwtN8sXCZywZM20bKSt4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "203535497666-39gina0jcokvkaihrfpl54r0sqrqomlk.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "203535497666-9bq2dlm0vo4flbo1lj7g2v71d8gdc919.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.teamCookApp"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:203535497666:android:4574e07046a6173461fe5b",
+        "android_client_info": {
+          "package_name": "com.example.team_cook_app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "203535497666-39gina0jcokvkaihrfpl54r0sqrqomlk.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB1hWu72ocbG-dlwtN8sXCZywZM20bKSt4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "203535497666-39gina0jcokvkaihrfpl54r0sqrqomlk.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "203535497666-9bq2dlm0vo4flbo1lj7g2v71d8gdc919.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.teamCookApp"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
