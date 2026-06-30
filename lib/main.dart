@@ -4092,6 +4092,8 @@ class _AdminUserDetailScreenState extends State<AdminUserDetailScreen> {
               ),
             ),
 
+            const SizedBox(height: 12),
+
             Row(
               children: [
 
