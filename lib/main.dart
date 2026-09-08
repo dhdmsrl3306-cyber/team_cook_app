@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
@@ -368,78 +369,83 @@ class _HomeScreenState extends State<HomeScreen> {
   final CollectionReference<Map<String, dynamic>> _recipesRef =
       FirebaseFirestore.instance.collection('recipe_list');
   
-  // PageController를 클래스 변수로 선언하여 PageView에서 공유합니다.
   final PageController _bannerController = PageController(viewportFraction: 0.85);
+  final PageController _recipeSliderController = PageController();
   
   Timer? _bannerTimer;
   int _bannerPage = 0;
+  int _recipeSliderPage = 0;
+  int _maxRecipePages = 1;
   List<Map<String, dynamic>> _bannerRecipes = [];
 
-@override
-void initState() {
-  super.initState();
-  _loadBannerRecipes().then((_){
-    if (mounted) {
-      _startBannerTimer();
-    }
-  });
-}
+  @override
+  void initState() {
+    super.initState();
+    _loadBannerRecipes().then((_){
+      if (mounted) {
+        _startBannerTimer();
+      }
+    });
+  }
 
-// 타이머 시작 함수
-void _startBannerTimer() {
-  _bannerTimer = Timer.periodic(const Duration(seconds: 4), (timer) {
-    if (_bannerRecipes.isNotEmpty && _bannerController.hasClients) {
-      int nextPage = (_bannerPage + 1) % _bannerRecipes.length;
-      _bannerController.animateToPage(
-        nextPage,
-        duration: const Duration(milliseconds: 500),
-        curve: Curves.easeInOut,
-      );
-    }
-  });
-}
+  void _startBannerTimer() {
+    _bannerTimer = Timer.periodic(const Duration(seconds: 4), (timer) {
+      if (_bannerRecipes.isNotEmpty && _bannerController.hasClients) {
+        int nextPage = (_bannerPage + 1) % _bannerRecipes.length;
+        _bannerController.animateToPage(
+          nextPage,
+          duration: const Duration(milliseconds: 500),
+          curve: Curves.easeInOut,
+        );
+      }
+    });
+  }
 
-@override
-void dispose() {
-  _bannerTimer?.cancel(); // 페이지 종료 시 타이머 해제 (중요!)
-  _bannerController.dispose();
-  super.dispose();
-}
+  @override
+  void dispose() {
+    _bannerTimer?.cancel();
+    _bannerController.dispose();
+    _recipeSliderController.dispose();
+    super.dispose();
+  }
 
-  // 예시용 로드 함수 (실제 환경에 맞게 수정하여 사용하세요)
-Future<void> _loadBannerRecipes() async {
-  try {
-    // 1. 추천 관리 컬렉션에서 'today' 문서 가져오기
-    DocumentSnapshot meta = await FirebaseFirestore.instance
-        .collection('daily_recommendations')
-        .doc('today')
-        .get();
+  Future<void> _loadBannerRecipes() async {
+    try {
+      QuerySnapshot snapshot = await FirebaseFirestore.instance
+          .collection('recipes')
+          .get();
 
-    // 2. 문서가 존재하고 today_ids 배열이 있는지 확인
-    if (meta.exists && meta.data() != null) {
-      Map<String, dynamic> data = meta.data() as Map<String, dynamic>;
-      List<dynamic> ids = data['today_ids'] ?? [];
+      List<Map<String, dynamic>> allDocs = snapshot.docs.map((doc) {
+        final data = doc.data() as Map<String, dynamic>;
+        return {
+          ...data,
+          // 👇 Firestore 문서 안에 저장된 'recipeId' 필드를 우선적으로 사용합니다.
+          // 만약 필드명이 다르면 data['필드명'] 형태로 수정해주세요.
+          'recipeId': data['recipeId'] ?? doc.id, 
+        };
+      }).toList();
 
-      if (ids.isNotEmpty) {
-        // 3. 해당 ID 리스트에 있는 레시피만 가져오기
-        QuerySnapshot snapshot = await FirebaseFirestore.instance
-            .collection('recipes')
-            .where(FieldPath.documentId, whereIn: ids)
-            .get();
+      if (allDocs.isNotEmpty) {
+        final now = DateTime.now();
+        int dateSeed = int.parse("${now.year}"
+            "${now.month.toString().padLeft(2, '0')}"
+            "${now.day.toString().padLeft(2, '0')}");
+
+        allDocs.shuffle(Random(dateSeed));
+
+        int selectCount = allDocs.length < 5 ? allDocs.length : 5;
+        List<Map<String, dynamic>> selectedRecipes = allDocs.sublist(0, selectCount);
 
         if (mounted) {
           setState(() {
-            _bannerRecipes = snapshot.docs
-                .map((doc) => {'id': doc.id, ...doc.data() as Map<String, dynamic>})
-                .toList();
+            _bannerRecipes = selectedRecipes;
           });
         }
       }
+    } catch (e) {
+      debugPrint("추천 레시피 로드 실패: $e");
     }
-  } catch (e) {
-    debugPrint("추천 레시피 로드 실패: $e");
   }
-}
 
   Future<void> _toggleScrap(Map<String, dynamic> recipe) async {
     if (!widget.isLoggedIn) {
@@ -455,14 +461,13 @@ Future<void> _loadBannerRecipes() async {
       }
     });
     try {
-        await FirebaseFirestore.instance.collection('users').doc(widget.loginId).update({
-          'scraps': globalScrapList,
-        });
-      } catch (e) {
-        debugPrint("스크랩 저장 실패: $e");
-        // 실패 시 사용자에게 알림을 줄 수도 있습니다.
-      }
+      await FirebaseFirestore.instance.collection('users').doc(widget.loginId).update({
+        'scraps': globalScrapList,
+      });
+    } catch (e) {
+      debugPrint("스크랩 저장 실패: $e");
     }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -473,13 +478,13 @@ Future<void> _loadBannerRecipes() async {
           slivers: [
             const SliverToBoxAdapter(
               child: Padding(
-                padding: EdgeInsets.fromLTRB(20, 10, 20, 20),
+                padding: EdgeInsets.fromLTRB(20, 10, 20, 10),
                 child: Text('Team Cook', style: TextStyle(fontSize: 26, fontWeight: FontWeight.w900, color: Colors.black)),
               ),
             ),
             SliverToBoxAdapter(
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
                 child: Row(
                   children: [
                     const Expanded(child: Divider(color: Colors.deepOrange, thickness: 1.5, endIndent: 10)),
@@ -491,31 +496,125 @@ Future<void> _loadBannerRecipes() async {
             ),
             SliverToBoxAdapter(child: _buildRecommendBanner()),
             const SliverToBoxAdapter(child: SizedBox(height: 20)),
-            const SliverToBoxAdapter(
+            
+            // 공유 레시피 타이틀 및 슬라이드 버튼
+            SliverToBoxAdapter(
               child: Padding(
-                padding: EdgeInsets.fromLTRB(20, 0, 20, 15),
-                child: Text('공유 레시피', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.grey)),
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text('공유 레시피', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.grey)),
+                    Row(
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.chevron_left, size: 22),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          color: _recipeSliderPage > 0 ? Colors.black87 : Colors.grey.shade300,
+                          onPressed: _recipeSliderPage > 0
+                              ? () {
+                                  _recipeSliderController.previousPage(
+                                    duration: const Duration(milliseconds: 300),
+                                    curve: Curves.easeInOut,
+                                  );
+                                }
+                              : null,
+                        ),
+                        const SizedBox(width: 8),
+                        Row(
+                          children: List.generate(_maxRecipePages, (index) => Container(
+                            margin: const EdgeInsets.symmetric(horizontal: 2),
+                            width: _recipeSliderPage == index ? 14 : 6,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              color: _recipeSliderPage == index ? Colors.deepOrange : Colors.grey.shade300,
+                              borderRadius: BorderRadius.circular(3),
+                            ),
+                          )),
+                        ),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          icon: const Icon(Icons.chevron_right, size: 22),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          color: _recipeSliderPage < _maxRecipePages - 1 ? Colors.black87 : Colors.grey.shade300,
+                          onPressed: _recipeSliderPage < _maxRecipePages - 1
+                              ? () {
+                                  _recipeSliderController.nextPage(
+                                    duration: const Duration(milliseconds: 300),
+                                    curve: Curves.easeInOut,
+                                  );
+                                }
+                              : null,
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
+
+            // 실시간 공유 레시피 영역
             StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-              stream: _recipesRef.orderBy('createdAt', descending: true).snapshots(),
+              stream: _recipesRef.orderBy('createdAt', descending: true).limit(24).snapshots(),
               builder: (context, snapshot) {
-                if (!snapshot.hasData) return const SliverToBoxAdapter(child: SizedBox());
+                if (!snapshot.hasData) return const SliverToBoxAdapter(child: SizedBox(height: 360));
                 final recipes = snapshot.data!.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList();
-                return SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-                  sliver: SliverGrid(
-                    delegate: SliverChildBuilderDelegate(
-                      (context, index) => _recipeCard(context, recipes[index]),
-                      childCount: recipes.length,
+                
+                if (recipes.isEmpty) {
+                  return const SliverToBoxAdapter(
+                    child: Padding(
+                      padding: EdgeInsets.symmetric(vertical: 40),
+                      child: Center(child: Text('등록된 공유 레시피가 없습니다.', style: TextStyle(color: Colors.grey))),
                     ),
-                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 3, mainAxisSpacing: 8, crossAxisSpacing: 8, childAspectRatio: 0.85,
+                  );
+                }
+
+                int pageCount = (recipes.length / 8).ceil();
+                if (pageCount > 3) pageCount = 3;
+
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (mounted && _maxRecipePages != pageCount) {
+                    setState(() {
+                      _maxRecipePages = pageCount;
+                    });
+                  }
+                });
+
+                return SliverToBoxAdapter(
+                  child: SizedBox(
+                    height: 370, // 👈 2줄 모두 1:1 썸네일과 하단 텍스트가 잘림 없이 완벽히 들어가도록 슬라이드 전체 높이를 대폭 상향
+                    child: PageView.builder(
+                      controller: _recipeSliderController,
+                      onPageChanged: (page) => setState(() => _recipeSliderPage = page),
+                      itemCount: pageCount,
+                      itemBuilder: (context, pageIndex) {
+                        final start = pageIndex * 8;
+                        final end = (start + 8 < recipes.length) ? start + 8 : recipes.length;
+                        final pageRecipes = recipes.sublist(start, end);
+
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 20),
+                          child: GridView.builder(
+                            physics: const NeverScrollableScrollPhysics(),
+                            itemCount: pageRecipes.length,
+                            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: 4,      // 가로 4개
+                              mainAxisSpacing: 14,    // 줄 간격 여유 확보
+                              crossAxisSpacing: 8,    // 칸 간격
+                              childAspectRatio: 0.65, // 👈 정사각형 썸네일 아래에 텍스트 공간이 충분히 남도록 비율 조정
+                            ),
+                            itemBuilder: (context, index) => _recipeCard(context, pageRecipes[index]),
+                          ),
+                        );
+                      },
                     ),
                   ),
                 );
               },
             ),
+            const SliverToBoxAdapter(child: SizedBox(height: 30)),
           ],
         ),
       ),
@@ -564,6 +663,15 @@ Future<void> _loadBannerRecipes() async {
 
   Widget _bannerCard(Map<String, dynamic> recipe) {
     bool isScrapped = globalScrapList.any((item) => item['recipe_food'] == recipe['recipe_food']);
+    
+    // 👇 recipeId가 없으면 'id'(문서 고유 ID)를 대신 사용하도록 수정
+    final recipeId = recipe['recipeId']?.toString().isNotEmpty == true 
+        ? recipe['recipeId'].toString() 
+        : (recipe['id']?.toString() ?? '');
+
+    const githubBaseUrl = "https://raw.githubusercontent.com/parkchankyu92-wq/recipe-images/main/";
+    final imageUrl = recipeId.isNotEmpty ? "$githubBaseUrl$recipeId.png" : 'https://picsum.photos/400/300';
+
     return GestureDetector(
       onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => RecipeDetailScreen(recipe: recipe, currentUserId: widget.loginId, isLoggedIn: widget.isLoggedIn))),
       child: Container(
@@ -574,7 +682,11 @@ Future<void> _loadBannerRecipes() async {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              Image.network(recipe['imageUrl'] ?? recipe['url'] ?? 'https://picsum.photos/400/300', fit: BoxFit.cover),
+              Image.network(
+                imageUrl, 
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) => Image.network('https://picsum.photos/400/300', fit: BoxFit.cover),
+              ),
               Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.transparent, Colors.black.withOpacity(0.55)]))),
               Positioned(left: 16, right: 16, bottom: 16, child: Text(recipe['recipe_food']?.toString() ?? '', style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))),
               Positioned(top: 10, right: 10, child: GestureDetector(onTap: () => _toggleScrap(recipe), child: Icon(isScrapped ? Icons.favorite : Icons.favorite_border, color: isScrapped ? Colors.red : Colors.white, size: 28))),
@@ -587,22 +699,38 @@ Future<void> _loadBannerRecipes() async {
 
   Widget _recipeCard(BuildContext context, Map<String, dynamic> recipe) {
     bool isScrapped = globalScrapList.any((item) => item['recipe_food'] == recipe['recipe_food']);
+    
+    final recipeId = recipe['recipeId']?.toString() ?? '';
+    const githubBaseUrl = "https://raw.githubusercontent.com/parkchankyu92-wq/recipe-images/main/";
+    final imageUrl = recipeId.isNotEmpty ? "$githubBaseUrl$recipeId.jpg" : 'https://picsum.photos/400/300';
+
     return InkWell(
       onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => RecipeDetailScreen(recipe: recipe, currentUserId: widget.loginId, isLoggedIn: widget.isLoggedIn))),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Expanded(
+          // 👈 1:1 정사각형 썸네일 고정
+          AspectRatio(
+            aspectRatio: 1.0,
             child: Stack(
+              fit: StackFit.expand,
               children: [
-                ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.network(recipe['imageUrl'] ?? recipe['url'] ?? 'https://picsum.photos/400/300', fit: BoxFit.cover, width: double.infinity)),
-                Positioned(top: 5, right: 5, child: GestureDetector(onTap: () => _toggleScrap(recipe), child: Icon(isScrapped ? Icons.favorite : Icons.favorite_border, color: isScrapped ? Colors.red : Colors.white, size: 20))),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8), 
+                  child: Image.network(
+                    imageUrl, 
+                    fit: BoxFit.cover, 
+                    errorBuilder: (context, error, stackTrace) => Image.network('https://picsum.photos/400/300', fit: BoxFit.cover),
+                  ),
+                ),
+                Positioned(top: 4, right: 4, child: GestureDetector(onTap: () => _toggleScrap(recipe), child: Icon(isScrapped ? Icons.favorite : Icons.favorite_border, color: isScrapped ? Colors.red : Colors.white, size: 18))),
               ],
             ),
           ),
-          const SizedBox(height: 5),
-          Text(recipe['recipe_food']?.toString() ?? '', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12), maxLines: 1, overflow: TextOverflow.ellipsis),
-          Text(recipe['category']?.toString() ?? '분류 없음', style: const TextStyle(fontSize: 10, color: Colors.grey)),
+          const SizedBox(height: 3), // 사진 바로 밑에 텍스트 배치
+          Text(recipe['recipe_food']?.toString() ?? '', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11), maxLines: 1, overflow: TextOverflow.ellipsis),
+          Text(recipe['category']?.toString() ?? '분류 없음', style: const TextStyle(fontSize: 9, color: Colors.grey), maxLines: 1, overflow: TextOverflow.ellipsis),
         ],
       ),
     );
@@ -628,29 +756,45 @@ class SearchScreen extends StatefulWidget {
 class _SearchScreenState extends State<SearchScreen> {
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _focusNode = FocusNode();
+  
+  // 파이어베이스 컬렉션 참조
   final CollectionReference<Map<String, dynamic>> _recipesRef =
+      FirebaseFirestore.instance.collection('recipes');
+  final CollectionReference<Map<String, dynamic>> _userRecipeListRef =
       FirebaseFirestore.instance.collection('recipe_list');
 
   String _searchQuery = '';
   bool _isSearching = false;
+  bool _isFocused = false;
 
-  static final List<String> _recentSearches = [];
+  final List<String> _recentSearches = [];
 
-  final List<String> _categories = ['전체', '한식', '중식', '일식', '양식', '기타'];
+  // '기타' 카테고리 추가
+  final List<String> _categories = ['전체', '한식', '중식', '일식', '양식', '기타', '공유 레시피'];
   String _selectedCategory = '전체';
 
+  // 인기 검색어 5개
   final List<String> _popularKeywords = [
     '김치찌개',
     '된장찌개',
     '불고기',
     '파스타',
     '볶음밥',
-    '계란말이',
-    '라면',
-    '닭갈비',
-    '순두부찌개',
-    '비빔밥',
   ];
+
+  // 가로 페이지네이션을 제어하기 위한 PageController
+  final PageController _basicPageController = PageController();
+  final PageController _sharedPageController = PageController();
+
+  @override
+  void initState() {
+    super.initState();
+    _focusNode.addListener(() {
+      setState(() {
+        _isFocused = _focusNode.hasFocus;
+      });
+    });
+  }
 
   void _submitSearch(String query) {
     final trimmed = query.trim();
@@ -661,6 +805,7 @@ class _SearchScreenState extends State<SearchScreen> {
     setState(() {
       _searchQuery = trimmed;
       _isSearching = true;
+      _isFocused = false;
     });
     _focusNode.unfocus();
   }
@@ -670,38 +815,63 @@ class _SearchScreenState extends State<SearchScreen> {
     setState(() {
       _searchQuery = '';
       _isSearching = false;
+      _isFocused = false;
     });
+    _focusNode.unfocus();
   }
 
   void _removeRecentKeyword(String keyword) {
     setState(() => _recentSearches.remove(keyword));
   }
 
-  bool _matchRecipe(Map<String, dynamic> recipe) {
-    final query = _searchQuery.trim().toLowerCase();
-    final category = recipe['category']?.toString() ?? '';
-    final categoryMatch =
-        _selectedCategory == '전체' || category == _selectedCategory;
-
-    if (_isSearching) {
-      if (query.isEmpty) return false;
-      final name =
-          recipe['recipe_food']?.toString().toLowerCase() ??
-          recipe['name']?.toString().toLowerCase() ??
-          '';
-      final ingredients = (recipe['ingredients'] is List)
-          ? (recipe['ingredients'] as List).join(' ').toLowerCase()
-          : recipe['ingredients']?.toString().toLowerCase() ?? '';
-      return categoryMatch &&
-          (name.contains(query) || ingredients.contains(query));
+  String _normalizeCategory(String? rawCategory) {
+    if (rawCategory == null || rawCategory.trim().isEmpty) return '기타';
+    
+    final category = rawCategory.trim();
+    if (category == '중국') return '중식';
+    if (category == '일본') return '일식';
+    if (category == '서양' || category == '이탈리아') return '양식';
+    
+    if (['한식', '중식', '일식', '양식'].contains(category)) {
+      return category;
     }
-    return categoryMatch;
+    
+    return '기타';
+  }
+
+  bool _matchRecipe(Map<String, dynamic> recipe, bool isSharedRecipe) {
+    final query = _searchQuery.trim().toLowerCase();
+    
+    if (!_isSearching) {
+      if (isSharedRecipe) return _selectedCategory == '전체' || _selectedCategory == '공유 레시피';
+      final category = _normalizeCategory(recipe['category']?.toString());
+      return _selectedCategory == '전체' || category == _selectedCategory;
+    }
+
+    final foodName = recipe['recipe_food']?.toString().toLowerCase() ?? '';
+    final ingredients = recipe['ingredients']?.toString().toLowerCase() ?? '';
+    final matchesQuery = foodName.contains(query) || ingredients.contains(query);
+
+    if (!matchesQuery) return false;
+
+    if (_selectedCategory != '전체') {
+      if (isSharedRecipe) {
+        return _selectedCategory == '공유 레시피';
+      } else {
+        final category = _normalizeCategory(recipe['category']?.toString());
+        return category == _selectedCategory;
+      }
+    }
+
+    return true;
   }
 
   @override
   void dispose() {
     _searchController.dispose();
     _focusNode.dispose();
+    _basicPageController.dispose();
+    _sharedPageController.dispose();
     super.dispose();
   }
 
@@ -709,103 +879,360 @@ class _SearchScreenState extends State<SearchScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: Stack(
           children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _searchController,
-                      focusNode: _focusNode,
-                      textInputAction: TextInputAction.search,
-                      onSubmitted: _submitSearch,
-                      onChanged: (v) {
-                        if (v.trim().isEmpty && _isSearching) {
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const SizedBox(height: 70),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: _categories.map((category) {
+                      final selected = category == _selectedCategory;
+                      return ChoiceChip(
+                        label: Text(category),
+                        selected: selected,
+                        selectedColor: Colors.deepOrange,
+                        labelStyle: TextStyle(
+                          color: selected ? Colors.white : Colors.black87,
+                          fontSize: 13,
+                        ),
+                        onSelected: (_) {
+                          setState(() => _selectedCategory = category);
+                        },
+                      );
+                    }).toList(),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Expanded(
+                  child: _isSearching ? _buildSearchResultView() : _buildNormalRecipeGrid(),
+                ),
+              ],
+            ),
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: Container(
+                color: Colors.white,
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _searchController,
+                        focusNode: _focusNode,
+                        textInputAction: TextInputAction.search,
+                        onSubmitted: _submitSearch,
+                        onChanged: (v) {
                           setState(() {
-                            _searchQuery = '';
-                            _isSearching = false;
+                            if (v.trim().isEmpty && _isSearching) {
+                              _searchQuery = '';
+                              _isSearching = false;
+                            }
                           });
-                        }
-                      },
-                      decoration: InputDecoration(
-                        hintText: '요리, 재료를 검색해주세요.',
-                        prefixIcon: const Icon(Icons.search),
-                        suffixIcon: _searchController.text.isNotEmpty
-                            ? IconButton(
-                                icon: const Icon(Icons.clear),
-                                onPressed: _clearSearch,
-                              )
-                            : null,
-                        filled: true,
-                        fillColor: Colors.grey.shade100,
-                        contentPadding: const EdgeInsets.symmetric(vertical: 0),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(15),
-                          borderSide: BorderSide.none,
+                        },
+                        decoration: InputDecoration(
+                          hintText: '요리, 재료를 검색해주세요.',
+                          prefixIcon: const Icon(Icons.search),
+                          suffixIcon: _searchController.text.isNotEmpty
+                              ? IconButton(
+                                  icon: const Icon(Icons.clear),
+                                  onPressed: _clearSearch,
+                                )
+                              : null,
+                          filled: true,
+                          fillColor: Colors.grey.shade100,
+                          contentPadding: const EdgeInsets.symmetric(vertical: 0),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(15),
+                            borderSide: BorderSide.none,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  if (_isSearching) ...[
-                    const SizedBox(width: 8),
-                    TextButton(
-                      onPressed: _clearSearch,
-                      child: const Text(
-                        '취소',
-                        style: TextStyle(color: Colors.deepOrange),
+                    if (_isSearching || _isFocused) ...[
+                      const SizedBox(width: 8),
+                      TextButton(
+                        onPressed: _clearSearch,
+                        child: const Text(
+                          '취소',
+                          style: TextStyle(color: Colors.deepOrange),
+                        ),
                       ),
-                    ),
+                    ],
                   ],
-                ],
+                ),
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                children: _categories.map((category) {
-                  final selected = category == _selectedCategory;
-                  return ChoiceChip(
-                    label: Text(category),
-                    selected: selected,
-                    selectedColor: Colors.deepOrange,
-                    labelStyle: TextStyle(
-                      color: selected ? Colors.white : Colors.black87,
-                      fontSize: 13,
+            if (_isFocused && !_isSearching)
+              Positioned(
+                top: 70,
+                left: 16,
+                right: 16,
+                child: Material(
+                  elevation: 6,
+                  borderRadius: BorderRadius.circular(16),
+                  color: Colors.white,
+                  child: Container(
+                    constraints: const BoxConstraints(maxHeight: 400),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: Colors.grey.shade200),
                     ),
-                    onSelected: (_) {
-                      setState(() => _selectedCategory = category);
-                    },
-                  );
-                }).toList(),
+                    child: _buildSuggestions(),
+                  ),
+                ),
               ),
-            ),
-            const SizedBox(height: 4),
-            Expanded(
-              child: _isSearching ? _buildResults() : _buildSuggestions(),
-            ),
           ],
         ),
       ),
     );
   }
 
+  Widget _buildNormalRecipeGrid() {
+    final isSharedRecipe = _selectedCategory == '공유 레시피';
+    final targetStream = isSharedRecipe
+        ? _userRecipeListRef.snapshots()
+        : _recipesRef.snapshots();
+
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: targetStream,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return const Center(child: Text('데이터 로드 중 오류가 발생했습니다.'));
+        }
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        final docs = snapshot.data?.docs ?? [];
+        final results = docs
+            .map((doc) => {'id': doc.id, ...doc.data()})
+            .where((recipe) => _matchRecipe(recipe, isSharedRecipe))
+            .toList();
+
+        if (results.isEmpty) {
+          return Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.search_off, size: 64, color: Colors.grey.shade300),
+                const SizedBox(height: 16),
+                Text(
+                  isSharedRecipe ? '등록된 공유 레시피가 없습니다.' : '등록된 레시피가 없습니다.',
+                  style: TextStyle(color: Colors.grey.shade500, fontSize: 15),
+                ),
+              ],
+            ),
+          );
+        }
+
+        return GridView.builder(
+          padding: const EdgeInsets.all(16),
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 4,
+            mainAxisSpacing: 12,
+            crossAxisSpacing: 12,
+            childAspectRatio: 0.68,
+          ),
+          itemCount: results.length,
+          itemBuilder: (context, index) {
+            return _searchResultCard(context, results[index], isSharedRecipe);
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildSearchResultView() {
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: _recipesRef.snapshots(),
+      builder: (context, basicSnapshot) {
+        return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: _userRecipeListRef.snapshots(),
+          builder: (context, sharedSnapshot) {
+            if (basicSnapshot.hasError || sharedSnapshot.hasError) {
+              return const Center(child: Text('데이터 로드 중 오류가 발생했습니다.'));
+            }
+            if (basicSnapshot.connectionState == ConnectionState.waiting ||
+                sharedSnapshot.connectionState == ConnectionState.waiting) {
+              return const Center(child: CircularProgressIndicator());
+            }
+
+            final basicDocs = basicSnapshot.data?.docs ?? [];
+            final basicResults = basicDocs
+                .map((doc) => {'id': doc.id, ...doc.data()})
+                .where((recipe) => _matchRecipe(recipe, false))
+                .toList();
+
+            final sharedDocs = sharedSnapshot.data?.docs ?? [];
+            final sharedResults = sharedDocs
+                .map((doc) => {'id': doc.id, ...doc.data()})
+                .where((recipe) => _matchRecipe(recipe, true))
+                .toList();
+
+            final totalCount = basicResults.length + sharedResults.length;
+
+            return SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '"$_searchQuery" 검색 결과 ${totalCount}건',
+                    style: const TextStyle(fontSize: 14, color: Colors.grey, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 16),
+                  if (_selectedCategory != '공유 레시피') ...[
+                    const Text(
+                      '기본 레시피',
+                      style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 10),
+                    basicResults.isEmpty
+                        ? const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 10),
+                            child: Text('검색된 기본 레시피가 없습니다.', style: TextStyle(color: Colors.grey)),
+                          )
+                        : _buildPagedTwoRowSection(
+                            context,
+                            basicResults,
+                            _basicPageController,
+                            false,
+                          ),
+                    const SizedBox(height: 10),
+                    const Divider(thickness: 3, color: Colors.black),
+                    const SizedBox(height: 10),
+                  ],
+                  if (_selectedCategory == '전체' || _selectedCategory == '공유 레시피') ...[
+                    const Text(
+                      '공유 레시피',
+                      style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 10),
+                    sharedResults.isEmpty
+                        ? const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 10),
+                            child: Text('검색된 공유 레시피가 없습니다.', style: TextStyle(color: Colors.grey)),
+                          )
+                        : _buildPagedTwoRowSection(
+                            context,
+                            sharedResults,
+                            _sharedPageController,
+                            true,
+                          ),
+                  ],
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildPagedTwoRowSection(
+    BuildContext context,
+    List<Map<String, dynamic>> items,
+    PageController pageController,
+    bool isShared,
+  ) {
+    const int itemsPerPage = 8;
+    final int pageCount = (items.length / itemsPerPage).ceil();
+
+    return SizedBox(
+      height: 310,
+      child: Row(
+        children: [
+          IconButton(
+            icon: Icon(
+              Icons.arrow_back,
+              size: 28,
+              color: pageCount > 1 ? Colors.black : Colors.grey.shade300,
+            ),
+            onPressed: pageCount > 1
+                ? () {
+                    if (pageController.hasClients) {
+                      final currentPage = pageController.page?.round() ?? 0;
+                      if (currentPage > 0) {
+                        pageController.previousPage(
+                          duration: const Duration(milliseconds: 300),
+                          curve: Curves.easeInOut,
+                        );
+                      }
+                    }
+                  }
+                : null,
+          ),
+          Expanded(
+            child: PageView.builder(
+              controller: pageController,
+              physics: pageCount > 1 ? const BouncingScrollPhysics() : const NeverScrollableScrollPhysics(),
+              itemCount: pageCount,
+              itemBuilder: (context, pageIndex) {
+                final start = pageIndex * itemsPerPage;
+                final end = (start + itemsPerPage < items.length)
+                    ? start + itemsPerPage
+                    : items.length;
+                final pageItems = items.sublist(start, end);
+
+                return GridView.count(
+                  crossAxisCount: 4,
+                  mainAxisSpacing: 10,
+                  crossAxisSpacing: 10,
+                  childAspectRatio: 0.68,
+                  physics: const NeverScrollableScrollPhysics(),
+                  shrinkWrap: true,
+                  children: pageItems.map((recipe) {
+                    return _searchResultCard(context, recipe, isShared);
+                  }).toList(),
+                );
+              },
+            ),
+          ),
+          IconButton(
+            icon: Icon(
+              Icons.arrow_forward,
+              size: 28,
+              color: pageCount > 1 ? Colors.black : Colors.grey.shade300,
+            ),
+            onPressed: pageCount > 1
+                ? () {
+                    if (pageController.hasClients) {
+                      final currentPage = pageController.page?.round() ?? 0;
+                      if (currentPage < pageCount - 1) {
+                        pageController.nextPage(
+                          duration: const Duration(milliseconds: 300),
+                          curve: Curves.easeInOut,
+                        );
+                      }
+                    }
+                  }
+                : null,
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildSuggestions() {
     return SingleChildScrollView(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          const SizedBox(height: 8),
           const Text(
-            '🔥 인기 검색어',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            '🔥 인기 검색어 TOP 5',
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -819,20 +1246,13 @@ class _SearchScreenState extends State<SearchScreen> {
                 },
                 child: Container(
                   padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 8,
+                    horizontal: 10,
+                    vertical: 6,
                   ),
                   decoration: BoxDecoration(
-                    color: Colors.white,
+                    color: Colors.grey.shade50,
                     borderRadius: BorderRadius.circular(20),
                     border: Border.all(color: Colors.grey.shade200),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.grey.shade100,
-                        blurRadius: 4,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
@@ -840,13 +1260,13 @@ class _SearchScreenState extends State<SearchScreen> {
                       Text(
                         '$rank',
                         style: TextStyle(
-                          fontSize: 13,
+                          fontSize: 12,
                           fontWeight: FontWeight.bold,
                           color: rank <= 3 ? Colors.deepOrange : Colors.grey,
                         ),
                       ),
-                      const SizedBox(width: 6),
-                      Text(keyword, style: const TextStyle(fontSize: 13)),
+                      const SizedBox(width: 4),
+                      Text(keyword, style: const TextStyle(fontSize: 12)),
                     ],
                   ),
                 ),
@@ -854,31 +1274,32 @@ class _SearchScreenState extends State<SearchScreen> {
             }).toList(),
           ),
           if (_recentSearches.isNotEmpty) ...[
-            const SizedBox(height: 28),
+            const SizedBox(height: 20),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 const Text(
                   '🕐 최근 검색어',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
                 ),
                 TextButton(
                   onPressed: () => setState(() => _recentSearches.clear()),
                   child: const Text(
                     '전체 삭제',
-                    style: TextStyle(color: Colors.grey, fontSize: 13),
+                    style: TextStyle(color: Colors.grey, fontSize: 12),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 4),
+            const SizedBox(height: 2),
             ..._recentSearches.map(
               (keyword) => ListTile(
+                dense: true,
                 contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.history, color: Colors.grey),
-                title: Text(keyword, style: const TextStyle(fontSize: 14)),
+                leading: const Icon(Icons.history, color: Colors.grey, size: 18),
+                title: Text(keyword, style: const TextStyle(fontSize: 13)),
                 trailing: IconButton(
-                  icon: const Icon(Icons.close, size: 16, color: Colors.grey),
+                  icon: const Icon(Icons.close, size: 14, color: Colors.grey),
                   onPressed: () => _removeRecentKeyword(keyword),
                 ),
                 onTap: () {
@@ -893,197 +1314,157 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
-  Widget _buildResults() {
-    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      stream: _recipesRef.orderBy('createdAt', descending: true).snapshots(),
-      builder: (context, snapshot) {
-        if (snapshot.hasError) {
-          return const Center(child: Text('데이터 로드 중 오류가 발생했습니다.'));
-        }
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
+  Widget _searchResultCard(BuildContext context, Map<String, dynamic> recipe, bool isSharedRecipe) {
+      bool isScrapped = globalScrapList.any(
+        (item) => item['recipe_food'] == recipe['recipe_food'],
+      );
 
-        final docs = snapshot.data?.docs ?? [];
-        final results = docs
-            .map((doc) => {'id': doc.id, ...doc.data()})
-            .where(_matchRecipe)
-            .toList();
+      final foodName = recipe['recipe_food']?.toString() ?? '';
+      final category = isSharedRecipe 
+          ? '공유 레시피' 
+          : _normalizeCategory(recipe['category']?.toString());
+      final difficulty = recipe['difficulty']?.toString() ?? '';
+      final cookTime = recipe['cook_time']?.toString() ?? '';
 
-        if (results.isEmpty) {
-          return Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.search_off, size: 64, color: Colors.grey.shade300),
-                const SizedBox(height: 16),
-                Text(
-                  '"$_searchQuery" 검색 결과가 없습니다.',
-                  style: TextStyle(color: Colors.grey.shade500, fontSize: 15),
-                ),
-              ],
+      final recipeId = recipe['recipeId']?.toString() ?? '';
+      const githubBaseUrl = "https://raw.githubusercontent.com/parkchankyu92-wq/recipe-images/main/";
+
+      final imageUrl = (!isSharedRecipe && recipeId.isNotEmpty)
+          ? "$githubBaseUrl$recipeId.png"
+          : (recipe['imageUrl'] ?? recipe['url'] ?? '');
+
+      return InkWell(
+        onTap: () async {
+          await Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => RecipeDetailScreen(
+                recipe: recipe,
+                currentUserId: widget.loginId,
+                isLoggedIn: widget.isLoggedIn,
+              ),
             ),
           );
-        }
-
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-              child: Text(
-                '"$_searchQuery" 검색 결과 ${results.length}건',
-                style: const TextStyle(fontSize: 13, color: Colors.grey),
-              ),
-            ),
-            Expanded(
-              child: GridView.builder(
-                padding: const EdgeInsets.all(16),
-                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 2,
-                  mainAxisSpacing: 15,
-                  crossAxisSpacing: 15,
-                  childAspectRatio: 0.75,
-                ),
-                itemCount: results.length,
-                itemBuilder: (context, index) {
-                  return _searchResultCard(context, results[index]);
-                },
-              ),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _searchResultCard(BuildContext context, Map<String, dynamic> recipe) {
-    bool isScrapped = globalScrapList.any(
-      (item) => item['recipe_food'] == recipe['recipe_food'],
-    );
-    return InkWell(
-      onTap: () async {
-        await Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => RecipeDetailScreen(
-              recipe: recipe,
-              currentUserId: widget.loginId,
-              isLoggedIn: widget.isLoggedIn,
-            ),
+          setState(() {});
+        },
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.grey.shade200),
           ),
-        );
-        setState(() {});
-      },
-      child: Container(
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(15),
-          border: Border.all(color: Colors.grey.shade200),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  ClipRRect(
-                    borderRadius: const BorderRadius.vertical(
-                      top: Radius.circular(15),
-                    ),
-                    child: Image.network(
-                      recipe['imageUrl'] ??
-                          recipe['url'] ??
-                          'https://picsum.photos/400/300',
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => Container(
-                        color: Colors.grey[300],
-                        child: const Icon(Icons.image_not_supported),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    ClipRRect(
+                      borderRadius: const BorderRadius.vertical(
+                        top: Radius.circular(12),
+                      ),
+                      child: Image.network(
+                        imageUrl.isNotEmpty ? imageUrl : 'https://picsum.photos/400/300',
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => Container(
+                          color: Colors.grey[300],
+                          child: const Icon(Icons.image_not_supported, size: 20),
+                        ),
                       ),
                     ),
-                  ),
-                  Positioned(
-                    top: 8,
-                    right: 8,
-                    child: GestureDetector(
-                      onTap: () {
-                        if (!widget.isLoggedIn) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('로그인 후 이용 가능합니다.')),
-                          );
-                          return;
-                        }
-                        setState(() {
-                          if (isScrapped) {
-                            globalScrapList.removeWhere(
-                              (item) =>
-                                  item['recipe_food'] == recipe['recipe_food'],
+                    Positioned(
+                      top: 4,
+                      right: 4,
+                      child: GestureDetector(
+                        onTap: () {
+                          if (!widget.isLoggedIn) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('로그인 후 이용 가능합니다.')),
                             );
-                          } else {
-                            globalScrapList.add(recipe);
+                            return;
                           }
-                        });
-                      },
-                      child: Container(
-                        padding: const EdgeInsets.all(6),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(0.3),
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(
-                          isScrapped ? Icons.favorite : Icons.favorite_border,
-                          color: isScrapped ? Colors.red : Colors.white,
-                          size: 20,
+                          setState(() {
+                            if (isScrapped) {
+                              globalScrapList.removeWhere(
+                                (item) =>
+                                    item['recipe_food'] == recipe['recipe_food'],
+                              );
+                            } else {
+                              globalScrapList.add(recipe);
+                            }
+                          });
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.all(4),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.3),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            isScrapped ? Icons.favorite : Icons.favorite_border,
+                            color: isScrapped ? Colors.red : Colors.white,
+                            size: 14,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-            Padding(
-              padding: const EdgeInsets.all(10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    recipe['recipe_food']?.toString() ?? '',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 5),
-                  Text(
-                    recipe['category']?.toString() ?? '분류 없음',
-                    style: const TextStyle(fontSize: 11, color: Colors.grey),
-                  ),
-                  const SizedBox(height: 6),
-                  Row(
-                    children: [
-                      const Icon(Icons.star, color: Colors.orange, size: 14),
-                      Text(
-                        ' ${recipe['averageRating']?.toStringAsFixed(1) ?? recipe['score']?.toString() ?? '0.0'}',
-                        style: const TextStyle(fontSize: 12),
+              Padding(
+                padding: const EdgeInsets.all(6),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      foodName,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
                       ),
-                      const SizedBox(width: 8),
-                      Text(
-                        '난이도: ${recipe['difficulty'] ?? recipe['level'] ?? ''}',
-                        style: const TextStyle(
-                          fontSize: 11,
-                          color: Colors.grey,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      category,
+                      style: const TextStyle(fontSize: 10, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        if (cookTime.isNotEmpty) ...[
+                          const Icon(Icons.access_time, size: 10, color: Colors.grey),
+                          const SizedBox(width: 2),
+                          Text(
+                            cookTime,
+                            style: const TextStyle(fontSize: 9, color: Colors.grey),
+                          ),
+                          const SizedBox(width: 4),
+                        ],
+                        if (difficulty.isNotEmpty)
+                          Expanded(
+                            child: Text(
+                              '난이도: $difficulty',
+                              style: const TextStyle(
+                                fontSize: 9,
+                                color: Colors.grey,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
-      ),
-    );
+      );
   }
 }
-
 // ---------------------------------------------------------
 // RecipeFormScreen
 // ---------------------------------------------------------
@@ -1137,9 +1518,12 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
           initialData['recipe_food']?.toString() ??
           initialData['name']?.toString() ??
           '';
-      _urlController.text =
-          initialData['imageUrl']?.toString() ??
-          'https://picsum.photos/400/300';
+      
+      // 사용자 등록 레시피이므로 기존 DB 주소(imageUrl 또는 url)를 그대로 가져오거나 없으면 기본 이미지 사용
+      _urlController.text = initialData['imageUrl']?.toString() ??
+                            initialData['url']?.toString() ??
+                            'https://picsum.photos/400/300';
+
       _timeController.text =
           initialData['cook_time']?.toString().replaceAll(
             RegExp(r'[^0-9]'),
@@ -1278,6 +1662,8 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
 
     final ingredientsText = ingredients.join(', ');
     final recipesRef = FirebaseFirestore.instance.collection('recipe_list');
+    
+    // 문서 참조를 먼저 가져와서 ID를 확보합니다.
     final doc = widget.recipeId != null
         ? recipesRef.doc(widget.recipeId)
         : recipesRef.doc();
@@ -1286,12 +1672,18 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
     final caloriesFormatted = caloriesValue.isEmpty
         ? ''
         : (caloriesValue.contains('Kcal')
-              ? caloriesValue
-              : '${caloriesValue}Kcal');
+            ? caloriesValue
+            : '${caloriesValue}Kcal');
+
+    // 깃허브 이미지 주소를 안전하게 확정하여 저장합니다.
+    final currentRecipeId = doc.id;
+    const githubBaseUrl = "https://raw.githubusercontent.com/parkchankyu92-wq/recipe-images/main/";
+    final finalImageUrl = "$githubBaseUrl$currentRecipeId.jpg";
 
     final Map<String, dynamic> data = {
+      'recipeId': currentRecipeId, // ID도 함께 저장해 주면 좋습니다.
       'recipe_food': _nameController.text.trim(),
-      'imageUrl': _urlController.text.trim(),
+      'imageUrl': finalImageUrl, // 👈 깃허브 주소로 강제 저장
       'category': _category,
       'calories': caloriesFormatted,
       'cook_time': '${_timeController.text.trim()}분',
@@ -1312,28 +1704,25 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
       });
       await doc.set(data);
 
-        await earnPoints(widget.loginId, 100); 
+      await earnPoints(widget.loginId, 100); 
 
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('레시피가 등록되었습니다! (+100 P)',
-              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-              backgroundColor: Colors.deepOrange,
-              duration: Duration(seconds: 2), // 메시지가 떠 있는 시간
-            ),
-          );
-        }
-    }
-     else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('레시피가 등록되었습니다! (+100 P)',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            backgroundColor: Colors.deepOrange,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } else {
       await doc.set(data, SetOptions(merge: true));
     }
 
     if (!mounted) return;
     Navigator.pop(context, data);
   }
-
-
   @override
 Widget build(BuildContext context) {
   final title = widget.recipeId == null ? '레시피 등록' : '레시피 수정';
@@ -1810,23 +2199,38 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
     return [];
   }
 
-  List<Map<String, dynamic>> _parseStepString(String raw) {
+ List<Map<String, dynamic>> _parseStepString(String raw) {
     final trimmed = raw.trim();
     if (trimmed.isEmpty) return [];
-    final splitResults = raw
+    
+    // 소수점(예: 0.5) 안의 점은 마침표로 인식하지 않도록 보정
+    // 숫자 뒤에 점이 있고 바로 숫자가 오는 패턴(예: \d+\.\d+)은 잠시 임시 문자로 치환해둡니다.
+    String safeRaw = raw.replaceAllMapped(RegExp(r'(\d+)\.(\d+)'), (match) {
+      return '${match.group(1)}_DOT_${match.group(2)}';
+    });
+
+    // 이제 진짜 문장 번호(예: 1., 2.) 기준으로 안전하게 쪼갭니다.
+    final splitResults = safeRaw
         .split(RegExp(r'(?=\d+\.)'))
         .map((e) => e.trim())
         .where((e) => e.isNotEmpty)
         .toList();
-    if (splitResults.length == 1) {
+
+    // 쪼갠 후에 아까 임시로 바꿔둔 _DOT_를 다시 원래 소수점(.)으로 복구합니다.
+    List<String> fixedSteps = splitResults.map((step) {
+      return step.replaceAll('_DOT_', '.');
+    }).toList();
+
+    if (fixedSteps.length == 1) {
       return [
         {
-          'desc': splitResults.first,
-          'time': _extractTimeFromDesc(splitResults.first),
+          'desc': fixedSteps.first,
+          'time': _extractTimeFromDesc(fixedSteps.first),
         },
       ];
     }
-    return splitResults
+    
+    return fixedSteps
         .map((desc) => {'desc': desc, 'time': _extractTimeFromDesc(desc)})
         .toList();
   }
@@ -1854,10 +2258,8 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
         .collection('reviews');
   }
 
-  // ★ 핵심 수정: isLoggedIn prop을 직접 사용
   bool get _isLoggedIn => widget.isLoggedIn && widget.currentUserId.isNotEmpty;
 
-  // ★ 스크랩 토글 - 비로그인 차단 완벽 처리
   Future<void> _toggleScrap() async {
     if (!_isLoggedIn) {
       ScaffoldMessenger.of(
@@ -2049,6 +2451,84 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
     });
   }
 
+  // 준비 TIP 팝업을 띄워주는 함수
+  void _showMeasurementTip(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('💡 계량 & 눈대중 TIP', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ],
+          ),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView(
+              shrinkWrap: true,
+              children: const [
+                _TipSection(
+                  title: '🥄 기본 계량 정보',
+                  content: '• 1큰술 (1T) = 15ml\n'
+                      '• 1 밥 숟가락 수북이 = 숟가락 위로 조금 쌓일 정도\n'
+                      '• 1 밥 숟가락 = 내용물 평평하게 깎아서\n\n'
+                      '• 1작은술(1t) = 5ml\n'
+                      '• 0.5 밥 숟가락 = 밥 숟가락의 절반\n'
+                      '• 1 커피 스푼 수북이 = 숟가락 위로 조금 쌓일 정도\n'
+                      '• 1 티 스푼 = 내용물 평평하게 깎아서\n\n'
+                      '• 1컵 (1C) = 200ml (종이컵 기준 1컵 + 종이컵의 10% 추가)\n'
+                      '• 1종이컵 = 180ml\n'
+                      '• 1국그릇 = 300ml',
+                ),
+                SizedBox(height: 16),
+                _TipSection(
+                  title: '🥕 재료별 맞춤 계량',
+                  content: '[가루류]\n'
+                      '• 1큰술 (1T) = 1 밥 숟가락 수북이\n'
+                      '• 1작은술 (1t) = 0.5 밥 숟가락\n\n'
+                      '[액체류]\n'
+                      '• 1큰술 (1T) = 1.5 밥 숟가락 (하나 + 절반)\n'
+                      '• 1작은술 (1t) = 2/3 밥 숟가락\n\n'
+                      '[장류 / 다진 양념류]\n'
+                      '• 1큰술 (1T) = 1.5 밥 숟가락\n'
+                      '• 1작은술 (1t) = 2/3 밥 숟가락 (자연스럽게 떠서 조금 덜기, 수북이 X)',
+                ),
+                SizedBox(height: 16),
+                _TipSection(
+                  title: '🤏 손 계량 정보',
+                  content: '• 1 꼬집 = 0.3g ~ 0.5g (엄지와 검지로 집은 정도)\n'
+                      '• 나물 1줌 = 손으로 자연스럽게 한가득 집은 정도\n'
+                      '• 1인분 면 1줌 = 500원 동전 크기\n'
+                      '• 1주먹 = 손에 한 번 움켜 쥐었을 때 들어갈 만큼\n'
+                      '• 돼지고기 1근 = 600g\n'
+                      '• 1인분 고기 = 약 150g ~ 200g',
+                ),
+                SizedBox(height: 16),
+                _TipSection(
+                  title: '🍅 재료별 눈대중👀 정보',
+                  content: '• 생선 1토막 = 약 85g\n'
+                      '• 돼지고기 1토막 = 약 100g\n'
+                      '• 양파(중간) 1개 = 약 170g\n'
+                      '• 당근(중간) 1개 = 약 150g\n'
+                      '• 무 1토막(약 2cm) = 약 150g\n'
+                      '• 대파 1/2대 = 약 70g\n'
+                      '• 마늘 1톨(중) = 5g\n'
+                      '• 생강 1톨(마늘과 같은 크기) = 5g',
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildReviewStars({
     required int rating,
     required void Function(int) onChanged,
@@ -2180,7 +2660,6 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
   }
 
   void _startTimer(int seconds) {
-
     _timer?.cancel();
 
     setState(() {
@@ -2188,30 +2667,35 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
       _isTimerActive = true;
     });
 
-
     _timer = Timer.periodic(
       const Duration(seconds: 1),
       (timer) {
-
         if (_remainingSeconds <= 0) {
-
           timer.cancel();
-
           setState(() {
             _isTimerActive = false;
           });
-
           return;
         }
-
 
         setState(() {
           _remainingSeconds--;
         });
-
       },
     );
   }
+
+  String _formatCategory(String? category) {
+    if (category == null) return '분류 없음';
+    
+    if (category == '중국') return '중식';
+    if (category == '일본') return '일식';
+    if (category == '서양' || category == '이탈리아') return '양식';
+    if (category == '한국') return '한식';
+    
+    return category; 
+  }
+
   @override
   Widget build(BuildContext context) {
     final recipeName =
@@ -2321,15 +2805,26 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                   background: Stack(
                     fit: StackFit.expand,
                     children: [
-                      Image.network(
-                        widget.recipe['imageUrl'] ??
-                            widget.recipe['url'] ??
-                            'https://picsum.photos/400/300',
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => Container(
-                          color: Colors.grey[300],
-                          child: const Icon(Icons.image_not_supported),
-                        ),
+                      Builder(
+                        builder: (context) {
+                          // 깃허브 이미지 기본 주소 (본인 환경에 맞게 수정하세요!)
+                          const githubBaseUrl = 'https://raw.githubusercontent.com/parkchankyu92-wq/recipe-images/main/';
+              
+                          final recipeId = widget.recipe['recipeId']?.toString() ?? '';
+                          
+                          // 1순위: 깃허브 이미지, 최후: 기본 임시 이미지
+                          final imageUrl = (recipeId.isNotEmpty ? '$githubBaseUrl$recipeId.png' : null) ?? 
+                                          'https://picsum.photos/400/300';
+
+                          return Image.network(
+                            imageUrl,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) => Container(
+                              color: Colors.grey[300],
+                              child: const Icon(Icons.image_not_supported),
+                            ),
+                          );
+                        },
                       ),
                       Container(
                         decoration: BoxDecoration(
@@ -2370,17 +2865,44 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                                 widget.recipe['level']?.toString() ??
                                 '쉬움',
                           ),
+                          _buildInfoBadge(
+                            Icons.flag_outlined, // 원하시는 아이콘으로 변경 가능합니다
+                            _formatCategory(widget.recipe['category']?.toString()), // 👈 함수 적용!
+                          ),
                         ],
                       ),
                       const SizedBox(height: 30),
-                      const Text(
-                        '준비 재료',
-                        style: TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                        ),
+                      
+                      // 💡 여기 준비 재료 옆에 [준비 TIP] 버튼 추가 완료!
+                      Row(
+                        children: [
+                          const Text(
+                            '준비 재료',
+                            style: TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(width: 10), // 텍스트와 버튼 사이 간격 (원하시면 조절 가능)
+                          TextButton.icon(
+                            onPressed: () => _showMeasurementTip(context),
+                            icon: const Icon(Icons.help_outline, size: 16, color: Colors.deepOrange),
+                            label: const Text(
+                              '⭐ 준비 TIP ⭐',
+                              style: TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold, fontSize: 15),
+                            ),
+                            style: TextButton.styleFrom(
+                              backgroundColor: Colors.orange.shade50,
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                              minimumSize: Size.zero, // 버튼의 기본 최소 여백 제거
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                            ),
+                          ),
+                        ],
                       ),
                       const SizedBox(height: 15),
+
                       Container(
                         padding: const EdgeInsets.all(15),
                         decoration: BoxDecoration(
@@ -2528,8 +3050,8 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                                 child: Text(
                                   _isEditingReview ? '댓글 수정' : '댓글 등록',
                                   style: const TextStyle(
-                                    color: Colors.white,         // 글자색: 흰색
-                                    fontWeight: FontWeight.bold, // 강조를 위한 굵게 설정
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
                                   ),
                                 ),
                               ),
@@ -2683,6 +3205,33 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
               ],
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+// 💡 팝업 내부 디자인을 잡아주는 보조 위젯 클래스
+class _TipSection extends StatelessWidget {
+  final String title;
+  final String content;
+
+  const _TipSection({required this.title, required this.content});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Colors.deepOrange)),
+          const SizedBox(height: 6),
+          Text(content, style: const TextStyle(fontSize: 13, height: 1.4, color: Colors.black87)),
         ],
       ),
     );
