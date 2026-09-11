@@ -418,10 +418,13 @@ class _HomeScreenState extends State<HomeScreen> {
       List<Map<String, dynamic>> allDocs = snapshot.docs.map((doc) {
         final data = doc.data() as Map<String, dynamic>;
         return {
+          'id': doc.id,
           ...data,
           // 👇 Firestore 문서 안에 저장된 'recipeId' 필드를 우선적으로 사용합니다.
           // 만약 필드명이 다르면 data['필드명'] 형태로 수정해주세요.
-          'recipeId': data['recipeId'] ?? doc.id, 
+          'recipeId': data['recipeId'] ?? doc.id,
+          // 관리자 수정/삭제 시 어느 컬렉션('recipes') 소속인지 구분하기 위한 태그
+          'source': 'recipes',
         };
       }).toList();
 
@@ -560,7 +563,7 @@ class _HomeScreenState extends State<HomeScreen> {
               stream: _recipesRef.orderBy('createdAt', descending: true).limit(24).snapshots(),
               builder: (context, snapshot) {
                 if (!snapshot.hasData) return const SliverToBoxAdapter(child: SizedBox(height: 360));
-                final recipes = snapshot.data!.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList();
+                final recipes = snapshot.data!.docs.map((doc) => {'id': doc.id, ...doc.data(), 'source': 'recipe_list'}).toList();
                 
                 if (recipes.isEmpty) {
                   return const SliverToBoxAdapter(
@@ -1013,7 +1016,11 @@ class _SearchScreenState extends State<SearchScreen> {
 
         final docs = snapshot.data?.docs ?? [];
         final results = docs
-            .map((doc) => {'id': doc.id, ...doc.data()})
+            .map((doc) => {
+                  'id': doc.id,
+                  ...doc.data(),
+                  'source': isSharedRecipe ? 'recipe_list' : 'recipes',
+                })
             .where((recipe) => _matchRecipe(recipe, isSharedRecipe))
             .toList();
 
@@ -1067,13 +1074,13 @@ class _SearchScreenState extends State<SearchScreen> {
 
             final basicDocs = basicSnapshot.data?.docs ?? [];
             final basicResults = basicDocs
-                .map((doc) => {'id': doc.id, ...doc.data()})
+                .map((doc) => {'id': doc.id, ...doc.data(), 'source': 'recipes'})
                 .where((recipe) => _matchRecipe(recipe, false))
                 .toList();
 
             final sharedDocs = sharedSnapshot.data?.docs ?? [];
             final sharedResults = sharedDocs
-                .map((doc) => {'id': doc.id, ...doc.data()})
+                .map((doc) => {'id': doc.id, ...doc.data(), 'source': 'recipe_list'})
                 .where((recipe) => _matchRecipe(recipe, true))
                 .toList();
 
@@ -1474,6 +1481,9 @@ class RecipeFormScreen extends StatefulWidget {
   final String? recipeId;
   final String loginId;
   final Map<String, dynamic>? initialData;
+  // 저장될 Firestore 컬렉션. 공유 레시피는 'recipe_list'(기본값),
+  // 관리자가 기본 레시피를 수정하는 경우엔 'recipes'를 전달합니다.
+  final String targetCollection;
 
   const RecipeFormScreen({
     super.key,
@@ -1482,6 +1492,7 @@ class RecipeFormScreen extends StatefulWidget {
     required this.loginId,
     this.recipeId,
     this.initialData,
+    this.targetCollection = 'recipe_list',
   });
 
   @override
@@ -1661,7 +1672,8 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
         .toList();
 
     final ingredientsText = ingredients.join(', ');
-    final recipesRef = FirebaseFirestore.instance.collection('recipe_list');
+    final recipesRef =
+        FirebaseFirestore.instance.collection(widget.targetCollection);
     
     // 문서 참조를 먼저 가져와서 ID를 확보합니다.
     final doc = widget.recipeId != null
@@ -1680,6 +1692,12 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
     const githubBaseUrl = "https://raw.githubusercontent.com/parkchankyu92-wq/recipe-images/main/";
     final finalImageUrl = "$githubBaseUrl$currentRecipeId.jpg";
 
+    // 수정 모드에서는 기존에 저장돼 있던 작성자 정보를 그대로 유지합니다.
+    // (관리자가 다른 사람이 쓴 레시피를 수정해도 작성자가 admin으로 바뀌지 않도록 함)
+    final existingOwnerId = widget.initialData?['ownerId']?.toString();
+    final existingOwnerName = widget.initialData?['ownerName']?.toString();
+    final bool isEditing = widget.recipeId != null;
+
     final Map<String, dynamic> data = {
       'recipeId': currentRecipeId, // ID도 함께 저장해 주면 좋습니다.
       'recipe_food': _nameController.text.trim(),
@@ -1691,8 +1709,13 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
       'servings': _servingsController.text.trim(),
       'ingredients': ingredientsText,
       'steps': formattedSteps,
-      'ownerId': widget.ownerId,
-      'ownerName': widget.ownerName,
+      'ownerId': (isEditing && existingOwnerId != null && existingOwnerId.isNotEmpty)
+          ? existingOwnerId
+          : widget.ownerId,
+      'ownerName':
+          (isEditing && existingOwnerName != null && existingOwnerName.isNotEmpty)
+              ? existingOwnerName
+              : widget.ownerName,
     };
 
     if (widget.recipeId == null) {
@@ -2250,12 +2273,21 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
   String? _editingReviewId;
   Map<String, dynamic>? _editingReview;
 
+  // 레시피가 어느 컬렉션 소속인지('recipes'=기본 레시피, 'recipe_list'=공유 레시피)
+  // 화면에 넘어온 recipe 맵의 'source' 태그로 판별합니다. 태그가 없는 구버전 데이터는
+  // 기존 동작과 동일하게 'recipe_list'로 취급합니다.
+  String get _recipeSource =>
+      widget.recipe['source']?.toString() == 'recipes' ? 'recipes' : 'recipe_list';
+
+  CollectionReference<Map<String, dynamic>> get _recipeCollectionRef =>
+      FirebaseFirestore.instance.collection(_recipeSource);
+
+  // 관리자 계정(아이디 'admin') 여부. 앱 전역에서 쓰는 관리자 판별 방식과 동일합니다.
+  bool get _isAdmin => widget.currentUserId == 'admin';
+
   CollectionReference<Map<String, dynamic>> get _reviewsRef {
     final recipeId = widget.recipe['id']?.toString();
-    return FirebaseFirestore.instance
-        .collection('recipe_list')
-        .doc(recipeId)
-        .collection('reviews');
+    return _recipeCollectionRef.doc(recipeId).collection('reviews');
   }
 
   bool get _isLoggedIn => widget.isLoggedIn && widget.currentUserId.isNotEmpty;
@@ -2314,9 +2346,7 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
     final recipeId = widget.recipe['id']?.toString();
     if (recipeId == null || recipeId.isEmpty) return;
 
-    final recipeRef = FirebaseFirestore.instance
-        .collection('recipe_list')
-        .doc(recipeId);
+    final recipeRef = _recipeCollectionRef.doc(recipeId);
     final rating = _reviewRating.clamp(1, 5);
     final currentAvg =
         (widget.recipe['averageRating'] as num?)?.toDouble() ?? 0.0;
@@ -2413,9 +2443,7 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
     final recipeId = widget.recipe['id']?.toString();
     if (recipeId == null || recipeId.isEmpty) return;
 
-    final recipeRef = FirebaseFirestore.instance
-        .collection('recipe_list')
-        .doc(recipeId);
+    final recipeRef = _recipeCollectionRef.doc(recipeId);
     final currentAvg =
         (widget.recipe['averageRating'] as num?)?.toDouble() ?? 0.0;
     final currentCount = (widget.recipe['ratingCount'] is int)
@@ -2705,6 +2733,8 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
     );
     final bool isOwner =
         _isLoggedIn && widget.recipe['ownerId'] == widget.currentUserId;
+    // 작성자 본인이거나, 관리자 계정이면 기본/공유 레시피 상관없이 수정·삭제 가능
+    final bool canManage = _isLoggedIn && (isOwner || _isAdmin);
 
     return Scaffold(
       backgroundColor: Colors.grey.shade50,
@@ -2726,9 +2756,10 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                     ),
                     onPressed: _toggleScrap,
                   ),
-                  if (isOwner) ...[
+                  if (canManage) ...[
                     IconButton(
                       icon: const Icon(Icons.edit, color: Colors.deepOrange),
+                      tooltip: isOwner ? '수정' : '수정 (관리자)',
                       onPressed: () async {
                         final updated =
                             await Navigator.push<Map<String, dynamic>>(
@@ -2736,10 +2767,17 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                               MaterialPageRoute(
                                 builder: (context) => RecipeFormScreen(
                                   loginId: widget.currentUserId,
-                                  ownerId: widget.currentUserId,
-                                  ownerName: widget.recipe['ownerName'] ?? '',
+                                  // 관리자가 다른 사람의 레시피를 수정하더라도 원래 작성자를
+                                  // 그대로 유지하기 위해, 기존 ownerId가 있으면 우선 사용합니다.
+                                  ownerId: widget.recipe['ownerId']?.toString() ??
+                                      widget.currentUserId,
+                                  ownerName:
+                                      widget.recipe['ownerName']?.toString() ?? '',
                                   recipeId: widget.recipe['id']?.toString(),
                                   initialData: widget.recipe,
+                                  // 기본 레시피('recipes')인지 공유 레시피('recipe_list')인지에 따라
+                                  // 저장될 컬렉션을 그대로 유지합니다.
+                                  targetCollection: _recipeSource,
                                 ),
                               ),
                             );
@@ -2750,12 +2788,17 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                     ),
                     IconButton(
                       icon: const Icon(Icons.delete, color: Colors.redAccent),
+                      tooltip: isOwner ? '삭제' : '삭제 (관리자)',
                       onPressed: () async {
                         final confirmed = await showDialog<bool>(
                           context: context,
                           builder: (context) => AlertDialog(
                             title: const Text('레시피 삭제'),
-                            content: const Text('정말 이 레시피를 삭제하시겠습니까?'),
+                            content: Text(
+                              isOwner || !_isAdmin
+                                  ? '정말 이 레시피를 삭제하시겠습니까?'
+                                  : '관리자 권한으로 이 레시피를 삭제합니다.\n정말 삭제하시겠습니까?',
+                            ),
                             actions: [
                               TextButton(
                                 onPressed: () => Navigator.pop(context, false),
@@ -2774,9 +2817,7 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                         if (confirmed == true) {
                           final recipeId = widget.recipe['id']?.toString();
                           if (recipeId != null && recipeId.isNotEmpty) {
-                            final recipeRef = FirebaseFirestore.instance
-                                .collection('recipe_list')
-                                .doc(recipeId);
+                            final recipeRef = _recipeCollectionRef.doc(recipeId);
                             final reviewsSnapshot = await recipeRef
                                 .collection('reviews')
                                 .get();
@@ -3393,7 +3434,11 @@ class _ReviewListScreenState extends State<ReviewListScreen> {
                 .get();
             Navigator.pop(context);
             if (recipeDoc.exists) {
-              final recipeData = {'id': recipeDoc.id, ...recipeDoc.data()!};
+              final recipeData = {
+                'id': recipeDoc.id,
+                ...recipeDoc.data()!,
+                'source': 'recipe_list',
+              };
               await Navigator.push(
                 context,
                 MaterialPageRoute(
