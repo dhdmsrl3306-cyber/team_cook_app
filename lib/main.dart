@@ -20,6 +20,265 @@ Future<void> main() async {
   runApp(const TeamCookApp());
 }
 
+// ---------------------------------------------------------
+// Exchange Screen
+// ---------------------------------------------------------
+class ExchangeScreen extends StatefulWidget {
+  final String loginId;
+  const ExchangeScreen({super.key, required this.loginId});
+
+  @override
+  State<ExchangeScreen> createState() => _ExchangeScreenState();
+}
+
+class _ExchangeScreenState extends State<ExchangeScreen> {
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('교환소')),
+      body: StreamBuilder<QuerySnapshot>(
+        stream: FirebaseFirestore.instance.collection('coupons').snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+            return const Center(child: Text('교환 가능한 기프티콘이 없습니다.'));
+          }
+
+          final docs = snapshot.data!.docs;
+
+          return ListView.builder(
+            padding: const EdgeInsets.all(12),
+            itemCount: docs.length,
+            itemBuilder: (context, index) {
+              final doc = docs[index];
+              final data = doc.data() as Map<String, dynamic>? ?? {};
+              final title = data['name']?.toString() ?? data['title']?.toString() ?? data['brand']?.toString() ?? '기프티콘';
+              final brand = data['brand']?.toString();
+              final cost = (data['price'] is int)
+                  ? data['price'] as int
+                  : (data['cost'] is int)
+                      ? data['cost'] as int
+                      : int.tryParse('${data['price'] ?? data['cost']}') ?? 0;
+              final imageUrl = data['img']?.toString() ?? data['image_url']?.toString() ?? '';
+
+              return Card(
+                margin: const EdgeInsets.only(bottom: 12),
+                child: Padding(
+                  padding: const EdgeInsets.all(12.0),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 90,
+                        height: 70,
+                        decoration: BoxDecoration(borderRadius: BorderRadius.circular(6), color: Colors.grey[200]),
+                        child: imageUrl.isNotEmpty
+                            ? ClipRRect(borderRadius: BorderRadius.circular(6), child: Image.network(imageUrl, fit: BoxFit.cover))
+                            : const Icon(Icons.card_giftcard, size: 36, color: Colors.grey),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+                            if (brand != null) Text(brand, style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                            const SizedBox(height: 8),
+                            Text('$cost P', style: const TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold)),
+                          ],
+                        ),
+                      ),
+                      ElevatedButton(
+                        onPressed: () => _redeemCoupon(context, doc.id, cost, title),
+                        child: const Text('교환'),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> _redeemCoupon(BuildContext context, String couponId, int cost, String title) async {
+    if (widget.loginId.isEmpty) {
+      if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('로그인이 필요합니다.')));
+      return;
+    }
+
+    // 로그인 ID는 로그인 이름(login_id)일 수 있으므로 사용자의 실제 문서 참조를 쿼리로 찾는다.
+    final couponRef = FirebaseFirestore.instance.collection('coupons').doc(couponId);
+    final userQuery = await FirebaseFirestore.instance
+        .collection('users')
+        .where('login_id', isEqualTo: widget.loginId)
+        .limit(1)
+        .get();
+    if (userQuery.docs.isEmpty) {
+      if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('사용자 문서를 찾을 수 없습니다.')));
+      return;
+    }
+    final userRef = userQuery.docs.first.reference;
+
+    try {
+      debugPrint('시도: redeem coupon $couponId for user ${widget.loginId} cost=$cost');
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        final userSnap = await tx.get(userRef);
+        if (!userSnap.exists) throw Exception('사용자 정보를 가져올 수 없습니다.');
+        final int currentPoints = (userSnap.data()?['point'] is int)
+          ? userSnap.data()!['point'] as int
+          : int.tryParse('${userSnap.data()?['point']}') ?? 0;
+
+        if (currentPoints < cost) throw Exception('포인트가 부족합니다.');
+
+        final couponSnap = await tx.get(couponRef);
+        if (couponSnap.exists) {
+          final couponData = couponSnap.data() as Map<String, dynamic>;
+          if (couponData.containsKey('stock')) {
+            final int stock = (couponData['stock'] is int) ? couponData['stock'] as int : int.tryParse('${couponData['stock']}') ?? 0;
+            if (stock <= 0) throw Exception('재고가 없습니다.');
+            tx.update(couponRef, {'stock': stock - 1});
+          }
+        }
+
+        tx.update(userRef, {'point': currentPoints - cost});
+
+        final redemptionRef = FirebaseFirestore.instance.collection('redemptions').doc();
+        tx.set(redemptionRef, {
+          'userId': widget.loginId,
+          'couponId': couponId,
+          'title': title,
+          'cost': cost,
+          'redeemedAt': FieldValue.serverTimestamp(),
+        });
+
+        // 사용자 보유 쿠폰으로 복사(user_coupons 컬렉션에 추가)
+        final userCouponRef = FirebaseFirestore.instance.collection('user_coupons').doc();
+        final couponData = couponSnap.exists ? (couponSnap.data() as Map<String, dynamic>) : <String, dynamic>{};
+        final userCouponData = {
+          'userDocId': userRef.id,
+          'userLoginId': widget.loginId,
+          'couponId': couponId,
+          'title': couponData['name'] ?? couponData['title'] ?? title,
+          'brand': couponData['brand'] ?? '',
+          'img': couponData['img'] ?? couponData['image_url'] ?? '',
+          'price': couponData['price'] ?? couponData['cost'] ?? cost,
+          'acquiredAt': FieldValue.serverTimestamp(),
+          'status': 'active',
+        };
+        tx.set(userCouponRef, userCouponData);
+        debugPrint('user_coupon created: ${userCouponRef.id} -> $userCouponData');
+      });
+
+      if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('교환이 완료되었습니다.')));
+    } catch (e, st) {
+      // 상세 로그 출력
+      debugPrint('Redeem error: $e');
+      debugPrint('$st');
+      // 박스된 예외(error/stack)가 있는 경우 추가로 출력
+      try {
+        final boxedError = (e as dynamic).error;
+        final boxedStack = (e as dynamic).stack;
+        debugPrint('Redeem boxed error: $boxedError');
+        debugPrint('Redeem boxed stack: $boxedStack');
+      } catch (_) {
+        // ignore
+      }
+      String message = '교환 실패';
+      try {
+        if (e is FirebaseException) message = e.message ?? e.toString();
+        else if (e is Exception) message = e.toString();
+        else message = '$e';
+      } catch (_) {
+        message = e.toString();
+      }
+      if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('교환 실패: $message')));
+    }
+  }
+}
+
+// ---------------------------------------------------------
+// Owned Coupons Screen
+// ---------------------------------------------------------
+class OwnedCouponsScreen extends StatelessWidget {
+  final String loginId;
+  const OwnedCouponsScreen({super.key, required this.loginId});
+
+  Future<List<QueryDocumentSnapshot>> _fetchOwnedCoupons() async {
+    // 먼저 사용자 문서 찾기
+    final userQuery = await FirebaseFirestore.instance.collection('users').where('login_id', isEqualTo: loginId).limit(1).get();
+    if (userQuery.docs.isEmpty) return [];
+    final userDocId = userQuery.docs.first.id;
+
+    // 두 가지 쿼리 실행: userLoginId 기준과 userDocId 기준
+    final q1 = FirebaseFirestore.instance.collection('user_coupons').where('userLoginId', isEqualTo: loginId).get();
+    final q2 = FirebaseFirestore.instance.collection('user_coupons').where('userDocId', isEqualTo: userDocId).get();
+
+    final results = await Future.wait([q1, q2]);
+    final allDocs = <QueryDocumentSnapshot>{};
+    for (final r in results) {
+      allDocs.addAll(r.docs);
+    }
+
+    final list = allDocs.toList();
+    // 정렬: acquiredAt 내림차순
+    list.sort((a, b) {
+      final ta = a.data() is Map && (a.data() as Map).containsKey('acquiredAt') ? (a.data() as Map)['acquiredAt'] : null;
+      final tb = b.data() is Map && (b.data() as Map).containsKey('acquiredAt') ? (b.data() as Map)['acquiredAt'] : null;
+      if (ta == null && tb == null) return 0;
+      if (ta == null) return 1;
+      if (tb == null) return -1;
+      return (tb as Timestamp).compareTo(ta as Timestamp);
+    });
+
+    return list;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('내 쿠폰')),
+      body: FutureBuilder<List<QueryDocumentSnapshot>>(
+        future: _fetchOwnedCoupons(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+          if (!snapshot.hasData || snapshot.data!.isEmpty) return const Center(child: Text('보유한 쿠폰이 없습니다.'));
+
+          final docs = snapshot.data!;
+          return ListView.builder(
+            padding: const EdgeInsets.all(12),
+            itemCount: docs.length,
+            itemBuilder: (context, index) {
+              final doc = docs[index];
+              final data = doc.data() as Map<String, dynamic>? ?? {};
+              final title = data['title']?.toString() ?? '쿠폰';
+              final brand = data['brand']?.toString();
+              final img = data['img']?.toString() ?? '';
+              final price = data['price']?.toString() ?? '';
+              final acquired = data['acquiredAt'];
+
+              String subtitle = price.isNotEmpty ? '$price P' : '';
+              if (acquired != null) subtitle = subtitle.isEmpty ? '획득: ${acquired.toString()}' : '$subtitle · 획득: ${acquired.toString()}';
+
+              return Card(
+                margin: const EdgeInsets.only(bottom: 12),
+                child: ListTile(
+                  leading: img.isNotEmpty ? Image.network(img, width: 48, height: 48, fit: BoxFit.cover) : const Icon(Icons.card_giftcard),
+                  title: Text(title),
+                  subtitle: Text(subtitle),
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
 class TeamCookApp extends StatelessWidget {
   const TeamCookApp({super.key});
   @override
@@ -3685,6 +3944,8 @@ class MyPageScreen extends StatelessWidget {
             subtitle: const Text('팀쿡의 회원이 되신 걸 환영해요!'),
           ),
           _buildPointSection(), // 인자 없이 호출 가능
+          // 내 쿠폰 보기
+          _buildMyCouponsTile(context),
           const Divider(thickness: 10, color: Color(0xFFF8F8F8)),
           if (loginId == 'admin')
             ListTile(
@@ -3698,6 +3959,14 @@ class MyPageScreen extends StatelessWidget {
           _menu(context, Icons.headset_mic, '고객센터', false),
           _menu(context, Icons.settings, '환경설정', false),
           _menu(context, Icons.info, '앱 정보', false),
+          const SizedBox(height: 10),
+          ListTile(
+            leading: const Icon(Icons.storefront, color: Colors.deepOrange),
+            title: const Text('교환소', style: TextStyle(fontWeight: FontWeight.w600)),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => ExchangeScreen(loginId: loginId))),
+          ),
+          const Divider(thickness: 1, color: Color(0xFFECECEC)),
           const Spacer(),
           TextButton(
             onPressed: onLogout,
@@ -3753,6 +4022,21 @@ class MyPageScreen extends StatelessWidget {
       },
     );
   }
+
+  // 내 쿠폰으로 이동하는 타일
+  Widget _buildMyCouponsTile(BuildContext context) {
+    return ListTile(
+      leading: const Icon(Icons.card_giftcard, color: Colors.deepOrange),
+      title: const Text('내 쿠폰', style: TextStyle(fontWeight: FontWeight.w600)),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(builder: (context) => OwnedCouponsScreen(loginId: loginId)),
+      ),
+    );
+  }
+
+  
 }
 // ---------------------------------------------------------
 // 7. 로그인 화면
