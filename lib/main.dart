@@ -1520,6 +1520,18 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
     TextEditingController(),
   ];
 
+  String _formatCategory(String? category) {
+    if (category == null) return '분류 없음';
+    
+    if (category == '중국') return '중식';
+    if (category == '일본') return '일식';
+    if (category == '서양' || category == '이탈리아') return '양식';
+    if (category == '한국') return '한식';
+    if (category== '퓨전') return '기타';
+    
+    return category; 
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1545,8 +1557,12 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
           initialData['calories']?.toString().replaceAll('Kcal', '').trim() ??
           '';
       _servingsController.text = initialData['servings']?.toString() ?? '';
-      _level = initialData['difficulty']?.toString() ?? _level;
-      _category = initialData['category']?.toString() ?? _category;
+      String tempLevel = initialData['difficulty']?.toString() ?? _level;
+      if (tempLevel == '초보') {
+        tempLevel = '쉬움';
+      }
+      _level = tempLevel;
+     _category = _formatCategory(initialData['category']?.toString() ?? _category);
 
       final ingredients = initialData['ingredients'];
       if (ingredients is String) {
@@ -1675,10 +1691,12 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
     final recipesRef =
         FirebaseFirestore.instance.collection(widget.targetCollection);
     
-    // 문서 참조를 먼저 가져와서 ID를 확보합니다.
-    final doc = widget.recipeId != null
-        ? recipesRef.doc(widget.recipeId)
-        : recipesRef.doc();
+    // 💡 수정 모드일 때는 기존 데이터에 있던 recipeId를 최우선으로 사용, 없으면 widget.recipeId, 신규면 새 ID 생성
+    final String currentRecipeId = widget.initialData?['recipeId']?.toString() ?? 
+                                   widget.recipeId ?? 
+                                   recipesRef.doc().id;
+                                   
+    final doc = recipesRef.doc(currentRecipeId);
 
     final caloriesValue = _caloriesController.text.trim();
     final caloriesFormatted = caloriesValue.isEmpty
@@ -1687,13 +1705,11 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
             ? caloriesValue
             : '${caloriesValue}Kcal');
 
-    // 깃허브 이미지 주소를 안전하게 확정하여 저장합니다.
-    final currentRecipeId = doc.id;
+    // 깃허브 이미지 주소도 고정된 currentRecipeId 기반으로 안전하게 생성됩니다.
     const githubBaseUrl = "https://raw.githubusercontent.com/parkchankyu92-wq/recipe-images/main/";
     final finalImageUrl = "$githubBaseUrl$currentRecipeId.jpg";
 
     // 수정 모드에서는 기존에 저장돼 있던 작성자 정보를 그대로 유지합니다.
-    // (관리자가 다른 사람이 쓴 레시피를 수정해도 작성자가 admin으로 바뀌지 않도록 함)
     final existingOwnerId = widget.initialData?['ownerId']?.toString();
     final existingOwnerName = widget.initialData?['ownerName']?.toString();
     final bool isEditing = widget.recipeId != null;
@@ -1701,7 +1717,9 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
     final Map<String, dynamic> data = {
       'recipeId': currentRecipeId, // ID도 함께 저장해 주면 좋습니다.
       'recipe_food': _nameController.text.trim(),
-      'imageUrl': finalImageUrl, // 👈 깃허브 주소로 강제 저장
+      'imageUrl': _urlController.text.trim().isNotEmpty 
+          ? _urlController.text.trim() 
+          : finalImageUrl, // 👈 깃허브 주소로 강제 저장
       'category': _category,
       'calories': caloriesFormatted,
       'cook_time': '${_timeController.text.trim()}분',
@@ -1820,6 +1838,7 @@ Widget build(BuildContext context) {
                         DropdownMenuItem(value: '중식', child: Text('중식')),
                         DropdownMenuItem(value: '일식', child: Text('일식')),
                         DropdownMenuItem(value: '양식', child: Text('양식')),
+                        DropdownMenuItem(value: '퓨전', child: Text('퓨전')),
                         DropdownMenuItem(value: '기타', child: Text('기타')),
                       ],
                       onChanged: (v) {
