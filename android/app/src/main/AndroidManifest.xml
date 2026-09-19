@@ -1,4 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 레시피 사진 촬영을 위한 카메라 권한 (image_picker) -->
+    <uses-permission android:name="android.permission.CAMERA"/>
     <application
         android:label="team_cook_app"
         android:name="${applicationName}"
