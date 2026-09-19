@@ -33,6 +33,7 @@ dependencies:
   firebase_core: ^4.10.0      # 👈 버전을 올려줍니다
   cloud_firestore: ^6.5.0    # 👈 버전을 올려줍니다
   firebase_auth: ^6.5.2       # 👈 버전을 올려줍니다
+  image_picker: ^1.1.2        # 👈 카메라/갤러리에서 사진 선택용 (사진은 base64로 인코딩해 Firestore에 직접 저장합니다)
 
   cupertino_icons: ^1.0.8
 
