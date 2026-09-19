@@ -1,13 +1,64 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:image_picker/image_picker.dart';
 import 'firebase_options.dart';
 import 'profile_edit_screen.dart';
+
+// ---------------------------------------------------------
+// 레시피 사진 렌더링 공용 헬퍼
+// ---------------------------------------------------------
+// Firebase Storage(유료 Blaze 요금제 필요) 대신, 사진을 base64로 인코딩해
+// Firestore 문서 안에 "data:image/jpeg;base64,...." 형태의 문자열로 직접 저장합니다.
+// 이 헬퍼는 그렇게 저장된 base64 사진과, 예전 방식대로 저장된 일반 http(s) URL을
+// 모두 알아서 구분해서 그려줍니다.
+Widget buildRecipeImage(
+  String? imageUrl, {
+  BoxFit fit = BoxFit.cover,
+  double? width,
+  double? height,
+}) {
+  final url = imageUrl?.trim() ?? '';
+  final placeholder = Container(
+    color: Colors.grey[300],
+    width: width,
+    height: height,
+    child: const Icon(Icons.image_not_supported, color: Colors.grey),
+  );
+
+  if (url.isEmpty) return placeholder;
+
+  if (url.startsWith('data:image')) {
+    try {
+      final base64Part = url.substring(url.indexOf(',') + 1);
+      final bytes = base64Decode(base64Part);
+      return Image.memory(
+        bytes,
+        fit: fit,
+        width: width,
+        height: height,
+        errorBuilder: (_, __, ___) => placeholder,
+      );
+    } catch (_) {
+      return placeholder;
+    }
+  }
+
+  return Image.network(
+    url,
+    fit: fit,
+    width: width,
+    height: height,
+    errorBuilder: (_, __, ___) => placeholder,
+  );
+}
 
 // ---------------------------------------------------------
 // 전역 임시 데이터 (UI 및 하트 찜하기 연동용 스크랩 리스트)
@@ -927,12 +978,20 @@ class _HomeScreenState extends State<HomeScreen> {
     bool isScrapped = globalScrapList.any((item) => item['recipe_food'] == recipe['recipe_food']);
     
     // 👇 recipeId가 없으면 'id'(문서 고유 ID)를 대신 사용하도록 수정
-    final recipeId = recipe['recipeId']?.toString().isNotEmpty == true 
-        ? recipe['recipeId'].toString() 
+    final recipeId = recipe['recipeId']?.toString().isNotEmpty == true
+        ? recipe['recipeId'].toString()
         : (recipe['id']?.toString() ?? '');
 
     const githubBaseUrl = "https://raw.githubusercontent.com/parkchankyu92-wq/recipe-images/main/";
-    final imageUrl = recipeId.isNotEmpty ? "$githubBaseUrl$recipeId.png" : 'https://picsum.photos/400/300';
+    // 새로 첨부한 사진(base64로 인코딩된 것)만 최우선으로 쓰고,
+    // 그 외(예전에 등록된 레시피의 imageUrl 등)는 원래 방식 그대로 깃허브 주소 추정치를 씁니다.
+    // → 기존에 이미 등록돼 있던 레시피들의 사진 표시는 하나도 바뀌지 않습니다.
+    final storedImageUrl = recipe['imageUrl']?.toString() ?? '';
+    final imageUrl = storedImageUrl.startsWith('data:image')
+        ? storedImageUrl
+        : (recipeId.isNotEmpty
+            ? "$githubBaseUrl$recipeId.png"
+            : 'https://picsum.photos/400/300');
 
     return GestureDetector(
       onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => RecipeDetailScreen(recipe: recipe, currentUserId: widget.loginId, isLoggedIn: widget.isLoggedIn))),
@@ -944,11 +1003,7 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              Image.network(
-                imageUrl, 
-                fit: BoxFit.cover,
-                errorBuilder: (context, error, stackTrace) => Image.network('https://picsum.photos/400/300', fit: BoxFit.cover),
-              ),
+              buildRecipeImage(imageUrl),
               Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.transparent, Colors.black.withOpacity(0.55)]))),
               Positioned(left: 16, right: 16, bottom: 16, child: Text(recipe['recipe_food']?.toString() ?? '', style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))),
               Positioned(top: 10, right: 10, child: GestureDetector(onTap: () => _toggleScrap(recipe), child: Icon(isScrapped ? Icons.favorite : Icons.favorite_border, color: isScrapped ? Colors.red : Colors.white, size: 28))),
@@ -964,7 +1019,13 @@ class _HomeScreenState extends State<HomeScreen> {
     
     final recipeId = recipe['recipeId']?.toString() ?? '';
     const githubBaseUrl = "https://raw.githubusercontent.com/parkchankyu92-wq/recipe-images/main/";
-    final imageUrl = recipeId.isNotEmpty ? "$githubBaseUrl$recipeId.jpg" : 'https://picsum.photos/400/300';
+    // 새로 첨부한 사진(base64)만 우선 사용, 그 외 기존 레시피는 표시 방식 그대로 유지
+    final storedImageUrl = recipe['imageUrl']?.toString() ?? '';
+    final imageUrl = storedImageUrl.startsWith('data:image')
+        ? storedImageUrl
+        : (recipeId.isNotEmpty
+            ? "$githubBaseUrl$recipeId.jpg"
+            : 'https://picsum.photos/400/300');
 
     return InkWell(
       onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => RecipeDetailScreen(recipe: recipe, currentUserId: widget.loginId, isLoggedIn: widget.isLoggedIn))),
@@ -979,12 +1040,8 @@ class _HomeScreenState extends State<HomeScreen> {
               fit: StackFit.expand,
               children: [
                 ClipRRect(
-                  borderRadius: BorderRadius.circular(8), 
-                  child: Image.network(
-                    imageUrl, 
-                    fit: BoxFit.cover, 
-                    errorBuilder: (context, error, stackTrace) => Image.network('https://picsum.photos/400/300', fit: BoxFit.cover),
-                  ),
+                  borderRadius: BorderRadius.circular(8),
+                  child: buildRecipeImage(imageUrl),
                 ),
                 Positioned(top: 4, right: 4, child: GestureDetector(onTap: () => _toggleScrap(recipe), child: Icon(isScrapped ? Icons.favorite : Icons.favorite_border, color: isScrapped ? Colors.red : Colors.white, size: 18))),
               ],
@@ -1595,9 +1652,19 @@ class _SearchScreenState extends State<SearchScreen> {
       final recipeId = recipe['recipeId']?.toString() ?? '';
       const githubBaseUrl = "https://raw.githubusercontent.com/parkchankyu92-wq/recipe-images/main/";
 
-      final imageUrl = (!isSharedRecipe && recipeId.isNotEmpty)
-          ? "$githubBaseUrl$recipeId.png"
-          : (recipe['imageUrl'] ?? recipe['url'] ?? '');
+      final storedImageUrl =
+          recipe['imageUrl']?.toString() ?? recipe['url']?.toString() ?? '';
+      final String imageUrl;
+      if (isSharedRecipe) {
+        // 공유 레시피는 원래부터 imageUrl/url을 그대로 써왔으니 그대로 유지합니다.
+        imageUrl = storedImageUrl;
+      } else if (storedImageUrl.startsWith('data:image')) {
+        // 기본 레시피 중, 관리자가 새로 첨부한 사진(base64)만 우선 사용합니다.
+        imageUrl = storedImageUrl;
+      } else {
+        // 그 외 기본 레시피는 기존과 동일하게 깃허브 주소 추정치를 씁니다.
+        imageUrl = recipeId.isNotEmpty ? "$githubBaseUrl$recipeId.png" : '';
+      }
 
       return InkWell(
         onTap: () async {
@@ -1630,13 +1697,8 @@ class _SearchScreenState extends State<SearchScreen> {
                       borderRadius: const BorderRadius.vertical(
                         top: Radius.circular(12),
                       ),
-                      child: Image.network(
+                      child: buildRecipeImage(
                         imageUrl.isNotEmpty ? imageUrl : 'https://picsum.photos/400/300',
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => Container(
-                          color: Colors.grey[300],
-                          child: const Icon(Icons.image_not_supported, size: 20),
-                        ),
                       ),
                     ),
                     Positioned(
@@ -1761,9 +1823,6 @@ class RecipeFormScreen extends StatefulWidget {
 class _RecipeFormScreenState extends State<RecipeFormScreen> {
   final _formKey = GlobalKey<FormState>();
   final _nameController = TextEditingController();
-  final _urlController = TextEditingController(
-    text: 'https://picsum.photos/400/300',
-  );
   final _timeController = TextEditingController();
   final _caloriesController = TextEditingController();
   final _servingsController = TextEditingController();
@@ -1778,6 +1837,96 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
     TextEditingController(),
     TextEditingController(),
   ];
+
+  final ImagePicker _picker = ImagePicker();
+  bool _isUploading = false;
+
+  // 대표 사진: 새로 고른 사진이 있으면 bytes로 미리보기/업로드하고,
+  // 없으면 기존에 저장돼 있던 imageUrl을 그대로 보여줍니다.
+  Uint8List? _mainImageBytes;
+  String? _existingMainImageUrl;
+
+  // 단계별 사진: 각 단계마다 새로 고른 bytes / 기존 URL을 따로 관리합니다.
+  final List<Uint8List?> _stepImageBytes = [null, null];
+  final List<String?> _existingStepImageUrls = [null, null];
+
+  // Firestore 문서 하나당 1MB 제한이 있고, 대표 사진 + 단계별 사진이 전부 같은
+  // 문서 안에 같이 저장되기 때문에 사진을 넉넉히 압축해서 받습니다.
+  // (Firebase Storage처럼 별도 파일로 저장하는 게 아니라 문서 안에 텍스트로 넣는 방식이라
+  //  화질보다 "다 같이 들어가는지"가 더 중요해요)
+  Future<void> _pickMainImage() async {
+    final source = await _showImageSourceSheet();
+    if (source == null) return;
+    final picked = await _picker.pickImage(
+      source: source,
+      maxWidth: 900,
+      maxHeight: 900,
+      imageQuality: 60,
+    );
+    if (picked == null) return;
+    final bytes = await picked.readAsBytes();
+    setState(() {
+      _mainImageBytes = bytes;
+    });
+  }
+
+  Future<void> _pickStepImage(int index) async {
+    final source = await _showImageSourceSheet();
+    if (source == null) return;
+    final picked = await _picker.pickImage(
+      source: source,
+      maxWidth: 700,
+      maxHeight: 700,
+      imageQuality: 55,
+    );
+    if (picked == null) return;
+    final bytes = await picked.readAsBytes();
+    setState(() {
+      _stepImageBytes[index] = bytes;
+    });
+  }
+
+  void _removeMainImage() {
+    setState(() {
+      _mainImageBytes = null;
+      _existingMainImageUrl = null;
+    });
+  }
+
+  void _removeStepImage(int index) {
+    setState(() {
+      _stepImageBytes[index] = null;
+      _existingStepImageUrls[index] = null;
+    });
+  }
+
+  Future<ImageSource?> _showImageSourceSheet() {
+    return showModalBottomSheet<ImageSource>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Wrap(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_camera),
+              title: const Text('카메라로 촬영'),
+              onTap: () => Navigator.pop(context, ImageSource.camera),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library),
+              title: const Text('갤러리에서 선택'),
+              onTap: () => Navigator.pop(context, ImageSource.gallery),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 사진 bytes를 base64 문자열로 인코딩해 Firestore에 바로 저장할 수 있는
+  // "data:image/jpeg;base64,...." 형태로 만들어줍니다. (Firebase Storage 미사용)
+  String _bytesToDataUri(Uint8List bytes) {
+    return 'data:image/jpeg;base64,${base64Encode(bytes)}';
+  }
 
   String _formatCategory(String? category) {
     if (category == null) return '분류 없음';
@@ -1801,10 +1950,12 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
           initialData['name']?.toString() ??
           '';
       
-      // 사용자 등록 레시피이므로 기존 DB 주소(imageUrl 또는 url)를 그대로 가져오거나 없으면 기본 이미지 사용
-      _urlController.text = initialData['imageUrl']?.toString() ??
-                            initialData['url']?.toString() ??
-                            'https://picsum.photos/400/300';
+      // 수정 모드에서는 기존에 저장돼 있던 대표 사진 주소를 미리보기로 보여줍니다.
+      // (사용자가 새 사진을 고르지 않으면 이 주소를 그대로 유지합니다)
+      final existingUrl = initialData['imageUrl']?.toString() ??
+          initialData['url']?.toString() ??
+          '';
+      _existingMainImageUrl = existingUrl.isNotEmpty ? existingUrl : null;
 
       _timeController.text =
           initialData['cook_time']?.toString().replaceAll(
@@ -1843,6 +1994,7 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
                 'time': item['time'] is int
                     ? item['time']
                     : int.tryParse(item['time']?.toString() ?? '0') ?? 0,
+                'imageUrl': item['imageUrl']?.toString() ?? '',
               });
             }
           }
@@ -1863,6 +2015,8 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
           for (final c in _stepTimeControllers) c.dispose();
           _stepDescControllers.clear();
           _stepTimeControllers.clear();
+          _stepImageBytes.clear();
+          _existingStepImageUrls.clear();
 
           for (final step in stepsList) {
             var desc = step['desc']?.toString() ?? '';
@@ -1875,6 +2029,11 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
                 text: minutes > 0 ? minutes.toString() : '',
               ),
             );
+            _stepImageBytes.add(null);
+            final stepImageUrl = step['imageUrl']?.toString() ?? '';
+            _existingStepImageUrls.add(
+              stepImageUrl.isNotEmpty ? stepImageUrl : null,
+            );
           }
         }
       }
@@ -1884,7 +2043,6 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
   @override
   void dispose() {
     _nameController.dispose();
-    _urlController.dispose();
     _timeController.dispose();
     _caloriesController.dispose();
     _servingsController.dispose();
@@ -1898,6 +2056,8 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
     setState(() {
       _stepDescControllers.add(TextEditingController());
       _stepTimeControllers.add(TextEditingController());
+      _stepImageBytes.add(null);
+      _existingStepImageUrls.add(null);
     });
   }
 
@@ -1908,11 +2068,21 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
       _stepTimeControllers[index].dispose();
       _stepDescControllers.removeAt(index);
       _stepTimeControllers.removeAt(index);
+      _stepImageBytes.removeAt(index);
+      _existingStepImageUrls.removeAt(index);
     });
   }
 
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
+
+    // 대표 사진은 신규 등록이든 수정이든 최소 하나(새로 고른 사진 또는 기존 사진)는 있어야 합니다.
+    if (_mainImageBytes == null && _existingMainImageUrl == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('대표 사진을 선택해주세요.')));
+      return;
+    }
 
     final ingredients = _ingredientsController.text
         .split('\n')
@@ -1920,12 +2090,15 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
         .where((e) => e.isNotEmpty)
         .toList();
 
+    // desc, time과 함께 원래 인덱스(originalIndex)도 같이 담아둡니다.
+    // 사진 리스트(_stepImageBytes / _existingStepImageUrls)는 입력칸 순서 그대로라
+    // 나중에 업로드할 때 이 인덱스로 다시 찾아야 하거든요.
     final stepItems = <Map<String, dynamic>>[];
     for (var i = 0; i < _stepDescControllers.length; i++) {
       final desc = _stepDescControllers[i].text.trim();
       if (desc.isEmpty) continue;
       final seconds = int.tryParse(_stepTimeControllers[i].text.trim()) ?? 0;
-      stepItems.add({'desc': desc, 'time': seconds});
+      stepItems.add({'desc': desc, 'time': seconds, 'originalIndex': i});
     }
 
     if (ingredients.isEmpty || stepItems.isEmpty) {
@@ -1935,27 +2108,76 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
       return;
     }
 
-    final formattedSteps = stepItems
-        .asMap()
-        .entries
-        .map(
-          (entry) => {
-            'desc': '${entry.key + 1}. ${entry.value['desc']}',
-            'time': entry.value['time'] ?? 0,
-          },
-        )
-        .toList();
-
     final ingredientsText = ingredients.join(', ');
     final recipesRef =
         FirebaseFirestore.instance.collection(widget.targetCollection);
-    
+
     // 💡 수정 모드일 때는 기존 데이터에 있던 recipeId를 최우선으로 사용, 없으면 widget.recipeId, 신규면 새 ID 생성
-    final String currentRecipeId = widget.initialData?['recipeId']?.toString() ?? 
-                                   widget.recipeId ?? 
+    final String currentRecipeId = widget.initialData?['recipeId']?.toString() ??
+                                   widget.recipeId ??
                                    recipesRef.doc().id;
-                                   
+
     final doc = recipesRef.doc(currentRecipeId);
+
+    setState(() => _isUploading = true);
+
+    String mainImageUrl;
+    final List<Map<String, dynamic>> formattedSteps = [];
+
+    try {
+      // 대표 사진: 새로 고른 사진이 있으면 base64로 인코딩, 없으면 기존 주소 유지
+      if (_mainImageBytes != null) {
+        mainImageUrl = _bytesToDataUri(_mainImageBytes!);
+      } else {
+        mainImageUrl = _existingMainImageUrl!;
+      }
+
+      // 단계별 사진 (새로 고른 사진이 있는 단계만 인코딩)
+      for (var entryIndex = 0; entryIndex < stepItems.length; entryIndex++) {
+        final entry = stepItems[entryIndex];
+        final originalIndex = entry['originalIndex'] as int;
+        final newBytes = originalIndex < _stepImageBytes.length
+            ? _stepImageBytes[originalIndex]
+            : null;
+        final existingUrl = originalIndex < _existingStepImageUrls.length
+            ? _existingStepImageUrls[originalIndex]
+            : null;
+
+        String stepImageUrl = '';
+        if (newBytes != null) {
+          stepImageUrl = _bytesToDataUri(newBytes);
+        } else if (existingUrl != null) {
+          stepImageUrl = existingUrl;
+        }
+
+        formattedSteps.add({
+          'desc': '${entryIndex + 1}. ${entry['desc']}',
+          'time': entry['time'] ?? 0,
+          'imageUrl': stepImageUrl,
+        });
+      }
+
+      // Firestore 문서는 1개당 1MB(1,048,576byte) 제한이 있고, 대표+단계 사진이
+      // 전부 이 문서 하나에 같이 들어가므로 전체 용량을 미리 확인합니다.
+      final totalImageChars = mainImageUrl.length +
+          formattedSteps.fold<int>(
+            0,
+            (sum, step) => sum + (step['imageUrl'] as String).length,
+          );
+      const maxTotalChars = 900000; // 여유를 두고 900KB 정도로 제한
+      if (totalImageChars > maxTotalChars) {
+        throw '사진 용량이 너무 커서 저장할 수 없어요. 사진 개수를 줄이거나 일부 사진을 빼고 다시 시도해주세요.';
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isUploading = false);
+        final message = e is String ? e : '사진 처리 중 오류가 발생했습니다: $e';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(message)),
+        );
+      }
+      return;
+    }
 
     final caloriesValue = _caloriesController.text.trim();
     final caloriesFormatted = caloriesValue.isEmpty
@@ -1963,10 +2185,6 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
         : (caloriesValue.contains('Kcal')
             ? caloriesValue
             : '${caloriesValue}Kcal');
-
-    // 깃허브 이미지 주소도 고정된 currentRecipeId 기반으로 안전하게 생성됩니다.
-    const githubBaseUrl = "https://raw.githubusercontent.com/parkchankyu92-wq/recipe-images/main/";
-    final finalImageUrl = "$githubBaseUrl$currentRecipeId.jpg";
 
     // 수정 모드에서는 기존에 저장돼 있던 작성자 정보를 그대로 유지합니다.
     final existingOwnerId = widget.initialData?['ownerId']?.toString();
@@ -1976,9 +2194,7 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
     final Map<String, dynamic> data = {
       'recipeId': currentRecipeId, // ID도 함께 저장해 주면 좋습니다.
       'recipe_food': _nameController.text.trim(),
-      'imageUrl': _urlController.text.trim().isNotEmpty 
-          ? _urlController.text.trim() 
-          : finalImageUrl, // 👈 깃허브 주소로 강제 저장
+      'imageUrl': mainImageUrl,
       'category': _category,
       'calories': caloriesFormatted,
       'cook_time': '${_timeController.text.trim()}분',
@@ -2004,9 +2220,10 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
       });
       await doc.set(data);
 
-      await earnPoints(widget.loginId, 100); 
+      await earnPoints(widget.loginId, 100);
 
       if (mounted) {
+        setState(() => _isUploading = false);
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('레시피가 등록되었습니다! (+100 P)',
@@ -2018,6 +2235,7 @@ class _RecipeFormScreenState extends State<RecipeFormScreen> {
       }
     } else {
       await doc.set(data, SetOptions(merge: true));
+      if (mounted) setState(() => _isUploading = false);
     }
 
     if (!mounted) return;
@@ -2053,12 +2271,12 @@ Widget build(BuildContext context) {
                     v == null || v.trim().isEmpty ? '레시피 이름을 입력해주세요.' : null,
               ),
               const SizedBox(height: 15),
-              TextFormField(
-                controller: _urlController,
-                decoration: const InputDecoration(labelText: '대표 이미지 URL'),
-                validator: (v) =>
-                    v == null || v.trim().isEmpty ? '대표 이미지를 입력해주세요.' : null,
+              const Text(
+                '대표 사진',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               ),
+              const SizedBox(height: 10),
+              _buildMainImagePicker(),
               const SizedBox(height: 15),
               Row(
                 children: [
@@ -2227,6 +2445,8 @@ Widget build(BuildContext context) {
                       ),
 
                     ),
+                    const SizedBox(height: 8),
+                    _buildStepImagePicker(index),
                     if (_stepDescControllers.length > 1)
                       Align(
                         alignment: Alignment.centerRight,
@@ -2247,24 +2467,132 @@ Widget build(BuildContext context) {
                 width: double.infinity,
                 height: 55,
                 child: ElevatedButton(
-                  onPressed: _submit,
+                  onPressed: _isUploading ? null : _submit,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.deepOrange,
                   ),
-                  child: Text(
-                    widget.recipeId == null ? '레시피 등록 하기' : '수정 저장',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
+                  child: _isUploading
+                      ? const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(
+                            color: Colors.white,
+                            strokeWidth: 2.5,
+                          ),
+                        )
+                      : Text(
+                          widget.recipeId == null ? '레시피 등록 하기' : '수정 저장',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                 ),
               ),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  // 대표 사진 선택 UI: 미리보기 박스 + 선택/변경/삭제
+  Widget _buildMainImagePicker() {
+    Widget preview;
+    if (_mainImageBytes != null) {
+      preview = Image.memory(_mainImageBytes!, fit: BoxFit.cover);
+    } else if (_existingMainImageUrl != null) {
+      preview = buildRecipeImage(_existingMainImageUrl);
+    } else {
+      preview = const Center(
+        child: Icon(Icons.add_a_photo, size: 40, color: Colors.grey),
+      );
+    }
+
+    return GestureDetector(
+      onTap: _pickMainImage,
+      child: Stack(
+        children: [
+          Container(
+            width: double.infinity,
+            height: 180,
+            decoration: BoxDecoration(
+              color: Colors.grey.shade100,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.grey.shade300),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: preview,
+            ),
+          ),
+          if (_mainImageBytes != null || _existingMainImageUrl != null)
+            Positioned(
+              top: 8,
+              right: 8,
+              child: GestureDetector(
+                onTap: _removeMainImage,
+                child: Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: const BoxDecoration(
+                    color: Colors.black54,
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.close, color: Colors.white, size: 18),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // 단계별 사진 선택 UI: 작은 썸네일 박스 + "사진 추가/변경" 텍스트
+  Widget _buildStepImagePicker(int index) {
+    final bytes = index < _stepImageBytes.length ? _stepImageBytes[index] : null;
+    final existingUrl =
+        index < _existingStepImageUrls.length ? _existingStepImageUrls[index] : null;
+    final hasImage = bytes != null || existingUrl != null;
+
+    Widget thumb;
+    if (bytes != null) {
+      thumb = Image.memory(bytes, fit: BoxFit.cover);
+    } else if (existingUrl != null) {
+      thumb = buildRecipeImage(existingUrl);
+    } else {
+      thumb = const Icon(Icons.add_a_photo, size: 20, color: Colors.grey);
+    }
+
+    return Row(
+      children: [
+        GestureDetector(
+          onTap: () => _pickStepImage(index),
+          child: Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              color: Colors.grey.shade100,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.grey.shade300),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: thumb,
+            ),
+          ),
+        ),
+        const SizedBox(width: 10),
+        TextButton(
+          onPressed: () => _pickStepImage(index),
+          child: Text(hasImage ? '단계 사진 변경' : '단계 사진 추가 (선택)'),
+        ),
+        if (hasImage)
+          TextButton(
+            onPressed: () => _removeStepImage(index),
+            child: const Text('삭제', style: TextStyle(color: Colors.red)),
+          ),
+      ],
     );
   }
 }
@@ -2387,15 +2715,12 @@ class _ScrapScreenState extends State<ScrapScreen> {
                     borderRadius: const BorderRadius.vertical(
                       top: Radius.circular(15),
                     ),
-                    child: Image.network(
-                      recipe['imageUrl'] ??
-                          recipe['url'] ??
-                          'https://picsum.photos/400/300',
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => Container(
-                        color: Colors.grey[300],
-                        child: const Icon(Icons.image_not_supported),
-                      ),
+                    child: buildRecipeImage(
+                      (recipe['imageUrl']?.toString().isNotEmpty ?? false)
+                          ? recipe['imageUrl'].toString()
+                          : (recipe['url']?.toString().isNotEmpty ?? false)
+                              ? recipe['url'].toString()
+                              : 'https://picsum.photos/400/300',
                     ),
                   ),
                   Positioned(
@@ -2493,6 +2818,7 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
           'time': item['time'] is int
               ? item['time']
               : int.tryParse(item['time']?.toString() ?? '0') ?? 0,
+          'imageUrl': item['imageUrl']?.toString() ?? '',
         },
       ];
     }
@@ -3126,23 +3452,21 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                     children: [
                       Builder(
                         builder: (context) {
-                          // 깃허브 이미지 기본 주소 (본인 환경에 맞게 수정하세요!)
+                          // 깃허브 이미지 기본 주소 (예전 방식으로 등록된 레시피용 대체 주소)
                           const githubBaseUrl = 'https://raw.githubusercontent.com/parkchankyu92-wq/recipe-images/main/';
-              
-                          final recipeId = widget.recipe['recipeId']?.toString() ?? '';
-                          
-                          // 1순위: 깃허브 이미지, 최후: 기본 임시 이미지
-                          final imageUrl = (recipeId.isNotEmpty ? '$githubBaseUrl$recipeId.png' : null) ?? 
-                                          'https://picsum.photos/400/300';
 
-                          return Image.network(
-                            imageUrl,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) => Container(
-                              color: Colors.grey[300],
-                              child: const Icon(Icons.image_not_supported),
-                            ),
-                          );
+                          final recipeId = widget.recipe['recipeId']?.toString() ?? '';
+                          final storedImageUrl = widget.recipe['imageUrl']?.toString() ?? '';
+
+                          // 새로 첨부한 사진(base64)만 최우선으로 쓰고, 그 외 기존 레시피는
+                          // 원래대로 깃허브 주소 추정치를 씁니다. (기존 사진 표시는 그대로 유지)
+                          final imageUrl = storedImageUrl.startsWith('data:image')
+                              ? storedImageUrl
+                              : (recipeId.isNotEmpty
+                                  ? '$githubBaseUrl$recipeId.png'
+                                  : 'https://picsum.photos/400/300');
+
+                          return buildRecipeImage(imageUrl);
                         },
                       ),
                       Container(
@@ -3268,6 +3592,7 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                           index + 1,
                           step['desc']?.toString() ?? '',
                           stepTime,
+                          step['imageUrl']?.toString() ?? '',
                         );
                       }),
                       const SizedBox(height: 30),
@@ -3454,7 +3779,12 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
     );
   }
 
-  Widget _buildStepCard(int stepNum, String desc, int timeSeconds) {
+  Widget _buildStepCard(
+    int stepNum,
+    String desc,
+    int timeSeconds,
+    String imageUrl,
+  ) {
     return Container(
       margin: const EdgeInsets.only(bottom: 15),
       padding: const EdgeInsets.all(20),
@@ -3483,6 +3813,20 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(desc, style: const TextStyle(fontSize: 16, height: 1.5)),
+                if (imageUrl.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  GestureDetector(
+                    onTap: () => _showStepImagePreview(imageUrl),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(10),
+                      child: buildRecipeImage(
+                        imageUrl,
+                        height: 160,
+                        width: double.infinity,
+                      ),
+                    ),
+                  ),
+                ],
                 if (timeSeconds > 0) ...[
                   const SizedBox(height: 15),
                   InkWell(
@@ -3525,6 +3869,24 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  // 단계 사진을 탭했을 때 전체 화면으로 크게 보여줍니다.
+  void _showStepImagePreview(String imageUrl) {
+    showDialog(
+      context: context,
+      barrierColor: Colors.black87,
+      builder: (context) => GestureDetector(
+        onTap: () => Navigator.pop(context),
+        child: Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.all(16),
+          child: InteractiveViewer(
+            child: buildRecipeImage(imageUrl),
+          ),
+        ),
       ),
     );
   }
