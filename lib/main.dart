@@ -402,6 +402,64 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 }
 
+// ---------------------------------------------------------
+// 이용 정지 관련 공용 헬퍼
+// ---------------------------------------------------------
+DateTime? _parseSuspendedUntil(dynamic value) {
+  if (value == null) return null;
+  if (value is Timestamp) return value.toDate();
+  if (value is DateTime) return value;
+  return DateTime.tryParse(value.toString());
+}
+
+String _formatSuspensionDate(DateTime d) {
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${d.year}년 ${two(d.month)}월 ${two(d.day)}일 ${two(d.hour)}:${two(d.minute)}';
+}
+
+/// 현재 정지 중이면 안내 메시지를, 정지가 아니거나 기간이 끝났으면 null 을 반환
+String? getSuspensionMessage(Map<String, dynamic> data) {
+  if (data['user_status'] != 'suspended') return null;
+
+  final String rawReason = data['suspensionReason']?.toString().trim() ?? '';
+  final String reason = rawReason.isEmpty ? '사유 미작성' : rawReason;
+  final dynamic rawUntil = data['suspendedUntil'];
+
+  // 영구 정지
+  if (rawUntil == null) {
+    return '영구 정지된 계정으로 로그인이 불가능합니다.\n(사유: $reason)';
+  }
+
+  // 기간 정지
+  final DateTime? until = _parseSuspendedUntil(rawUntil);
+  if (until == null || !DateTime.now().isBefore(until)) return null;
+  return '${_formatSuspensionDate(until)}까지 로그인이 불가능합니다.\n(사유: $reason)';
+}
+
+Future<void> showSuspensionDialog(BuildContext context, String message) {
+  return showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Row(
+        children: [
+          Icon(Icons.block, color: Colors.red),
+          SizedBox(width: 8),
+          Text('이용 정지된 계정', style: TextStyle(fontWeight: FontWeight.bold)),
+        ],
+      ),
+      content: Text(message, style: const TextStyle(height: 1.5)),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('확인', style: TextStyle(color: Colors.deepOrange)),
+        ),
+      ],
+    ),
+  );
+}
+
 class RootScreen extends StatefulWidget {
   const RootScreen({super.key});
   @override
@@ -428,45 +486,24 @@ class _RootScreenState extends State<RootScreen> {
       .get();
 
     if (userDoc.exists && userDoc.data() != null) {
-
       final data = userDoc.data()!;
+      final String? suspensionMessage = getSuspensionMessage(data);
 
+      // 정지 중 → 로그인 중단 (영구/기간 모두)
+      if (suspensionMessage != null) {
+        await FirebaseAuth.instance.signOut();
+        if (!mounted) return;
+        showSuspensionDialog(context, suspensionMessage);
+        return;
+      }
+
+      // 기간 만료 → 자동 해제
       if (data['user_status'] == 'suspended') {
-
-        final until = data['suspendedUntil'];
-
-        // 기간 정지
-        if (until != null &&
-            until.toDate().isAfter(DateTime.now())) {
-
-          await FirebaseAuth.instance.signOut();
-
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                '정지된 계정입니다.\n'
-                '사유: ${data['suspensionReason'] ?? '사유 없음'}'
-              ),
-            ),
-          );
-
-          return; // 로그인 중단
-        }
-
-        // 기간 만료 자동 해제
-         if (until != null &&
-          !until.toDate().isAfter(DateTime.now())) {
-
-          await FirebaseFirestore.instance
-              .collection('users')
-              .doc(id)
-              .update({
-            'user_status': 'active',
-            'suspensionReason': '',
-            'suspendedUntil': null,
-          });
-
-        }
+        await userDoc.reference.update({
+          'user_status': 'active',
+          'suspensionReason': '',
+          'suspendedUntil': null,
+        });
       }
     }
     setState(() {
@@ -496,78 +533,31 @@ class _RootScreenState extends State<RootScreen> {
       .doc(id)
       .snapshots()
       .listen((snapshot) async {
+    if (!snapshot.exists || snapshot.data() == null) return;
 
-    if (snapshot.exists && snapshot.data() != null) {
+    final Map<String, dynamic> data = snapshot.data()!;
+    if (data['user_status'] != 'suspended') return;
 
-      final Map<String, dynamic> data = snapshot.data()!;
+    final String? suspensionMessage = getSuspensionMessage(data);
 
-      final String userStatus =
-          data['user_status']?.toString() ?? 'active';
-
-      final dynamic suspendedUntilData =
-          data['suspendedUntil'];
-
-
-      if (userStatus == 'suspended') {
-
-        // 기간 정지
-        if (suspendedUntilData != null) {
-
-          final DateTime suspendedUntil =
-              (suspendedUntilData is Timestamp)
-                  ? suspendedUntilData.toDate()
-                  : DateTime.parse(
-                      suspendedUntilData.toString()
-                    );
-
-
-          // 아직 정지 중
-          if (DateTime.now().isBefore(suspendedUntil)) {
-
-            _forceLogout(
-              suspendedUntil,
-              data['suspensionReason']?.toString()
-                  ?? '사유 미작성',
-            );
-
-          }
-
-          // 기간 종료 → 자동 해제
-          else {
-
-            await FirebaseFirestore.instance
-                .collection('users')
-                .doc(id)
-                .update({
-
-              'user_status': 'active',
-              'suspensionReason': '',
-              'suspendedUntil': null,
-
-            });
-
-          }
-
-        }
-
-        // 영구 정지
-        else {
-
-          _forceLogout(
-            DateTime.now(),
-            data['suspensionReason']?.toString()
-                ?? '사유 미작성',
-          );
-
-        }
-      }
+    if (suspensionMessage != null) {
+      // 아직 정지 중 → 강제 로그아웃
+      _forceLogout(suspensionMessage);
+    } else {
+      // 기간 종료 → 자동 해제
+      await snapshot.reference.update({
+        'user_status': 'active',
+        'suspensionReason': '',
+        'suspendedUntil': null,
+      });
     }
   });
 }
-  void _forceLogout(
-    DateTime suspendedUntil,
-    String reason,
-  ) {
+  void _forceLogout(String message) {
+    if (!isLoggedIn) return;
+    _userStatusSubscription?.cancel();
+    _userStatusSubscription = null;
+
     setState(() {
       isLoggedIn = false;
       userName = "";
@@ -577,15 +567,8 @@ class _RootScreenState extends State<RootScreen> {
 
     FirebaseAuth.instance.signOut();
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          '이용이 제한되었습니다.\n'
-          '해제 시간: $suspendedUntil\n'
-          '사유: $reason',
-        ),
-      ),
-    );
+    if (!mounted) return;
+    showSuspensionDialog(context, message);
   }
 
   @override
@@ -4485,6 +4468,25 @@ class _LoginScreenState extends State<LoginScreen> {
       final userDoc = snapshot.docs.first;
       final dbPassword = userDoc['password'];
       if (dbPassword == pw) {
+        final data = userDoc.data() as Map<String, dynamic>;
+
+        // 이용 정지된 계정이면 로그인 자체를 막고 안내 메시지 표시
+        final String? suspensionMessage = getSuspensionMessage(data);
+        if (suspensionMessage != null) {
+          if (!mounted) return;
+          await showSuspensionDialog(context, suspensionMessage);
+          return;
+        }
+
+        // 정지 기간이 끝났으면 자동 해제
+        if (data['user_status'] == 'suspended') {
+          await userDoc.reference.update({
+            'user_status': 'active',
+            'suspensionReason': '',
+            'suspendedUntil': null,
+          });
+        }
+
         final nickname = userDoc['nickname'];
         widget.onLoginSuccess(nickname, id);
         _showSnackBar('$nickname님, 환영합니다! 🎉', Colors.green);
