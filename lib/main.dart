@@ -11,6 +11,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:image_picker/image_picker.dart';
 import 'firebase_options.dart';
 import 'profile_edit_screen.dart';
+import 'user_doc.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 
@@ -66,6 +67,24 @@ Widget buildRecipeImage(
 // 전역 임시 데이터 (UI 및 하트 찜하기 연동용 스크랩 리스트)
 // ---------------------------------------------------------
 List<Map<String, dynamic>> globalScrapList = [];
+
+/// 현재 스크랩 목록을 Firestore users 문서의 scraps 필드에 저장합니다.
+/// 다른 기기/브라우저에서 로그인해도 같은 스크랩이 보이도록 모든 스크랩 변경은 이 함수를 거칩니다.
+/// loginId 가 uid 든 login_id 든 실제 회원 문서를 찾아서 저장합니다.
+Future<bool> saveScrapsToDb(String loginId) async {
+  try {
+    final ref = await resolveUserDocRef(loginId);
+    if (ref == null) {
+      debugPrint('스크랩 저장 실패: 회원 문서를 찾을 수 없음 ($loginId)');
+      return false;
+    }
+    await ref.update({'scraps': globalScrapList});
+    return true;
+  } catch (e) {
+    debugPrint('스크랩 저장 실패: $e');
+    return false;
+  }
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -480,12 +499,12 @@ class _RootScreenState extends State<RootScreen> {
   }
 
   Future<void> onLoginSuccess(String name, String id) async {
-     var userDoc = await FirebaseFirestore.instance
-      .collection('users')
-      .doc(id)
-      .get();
+    // id 가 uid(자동 로그인)든 login_id(직접 로그인)든 실제 회원 문서를 찾습니다.
+    final userRef = await resolveUserDocRef(id);
+    final DocumentSnapshot<Map<String, dynamic>>? userDoc =
+        userRef == null ? null : await userRef.get();
 
-    if (userDoc.exists && userDoc.data() != null) {
+    if (userDoc != null && userDoc.exists && userDoc.data() != null) {
       final data = userDoc.data()!;
       final String? suspensionMessage = getSuspensionMessage(data);
 
@@ -512,9 +531,9 @@ class _RootScreenState extends State<RootScreen> {
       loginId = id;
     });
 
-    _listenToUserStatus(id);
+    _listenToUserStatus(userRef);
 
-    if (userDoc.exists && userDoc.data() != null) {
+    if (userDoc != null && userDoc.exists && userDoc.data() != null) {
       final data = userDoc.data()!;
       setState(() {
         globalScrapList = List<Map<String, dynamic>>.from(data['scraps'] ?? []);
@@ -525,17 +544,28 @@ class _RootScreenState extends State<RootScreen> {
       });
     }
   }
- void _listenToUserStatus(String id) {
+ void _listenToUserStatus(DocumentReference<Map<String, dynamic>>? userRef) {
   _userStatusSubscription?.cancel();
+  _userStatusSubscription = null;
+  if (userRef == null) return;
 
-  _userStatusSubscription = FirebaseFirestore.instance
-      .collection('users')
-      .doc(id)
+  _userStatusSubscription = userRef
       .snapshots()
       .listen((snapshot) async {
     if (!snapshot.exists || snapshot.data() == null) return;
 
     final Map<String, dynamic> data = snapshot.data()!;
+
+    // 다른 기기에서 스크랩을 바꾸면 여기서도 실시간으로 반영합니다.
+    if (mounted && data['scraps'] is List) {
+      setState(() {
+        globalScrapList = (data['scraps'] as List)
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+      });
+    }
+
     if (data['user_status'] != 'suspended') return;
 
     final String? suspensionMessage = getSuspensionMessage(data);
@@ -610,12 +640,16 @@ class _RootScreenState extends State<RootScreen> {
             builder: (context) => SignUpScreen(onSuccess: onLoginSuccess),
           ),
         ),
-        onLogout: () => setState(() {
-          isLoggedIn = false;
-          userName = "";
-          loginId = "";
-          globalScrapList.clear();
-        }),
+        onLogout: () {
+          _userStatusSubscription?.cancel();
+          _userStatusSubscription = null;
+          setState(() {
+            isLoggedIn = false;
+            userName = "";
+            loginId = "";
+            globalScrapList.clear();
+          });
+        },
       ),
     ];
 
@@ -758,13 +792,7 @@ class _HomeScreenState extends State<HomeScreen> {
         globalScrapList.add(recipe);
       }
     });
-    try {
-      await FirebaseFirestore.instance.collection('users').doc(widget.loginId).update({
-        'scraps': globalScrapList,
-      });
-    } catch (e) {
-      debugPrint("스크랩 저장 실패: $e");
-    }
+    await saveScrapsToDb(widget.loginId);
   }
 
   @override
@@ -1112,6 +1140,9 @@ class _SearchScreenState extends State<SearchScreen> {
       _isFocused = false;
     });
     _focusNode.unfocus();
+    // 새 검색은 항상 첫 페이지부터 보여줍니다.
+    if (_basicPageController.hasClients) _basicPageController.jumpToPage(0);
+    if (_sharedPageController.hasClients) _sharedPageController.jumpToPage(0);
   }
 
   void _clearSearch() {
@@ -1278,18 +1309,22 @@ class _SearchScreenState extends State<SearchScreen> {
                 top: 70,
                 left: 16,
                 right: 16,
-                child: Material(
-                  elevation: 6,
-                  borderRadius: BorderRadius.circular(16),
-                  color: Colors.white,
-                  child: Container(
-                    constraints: const BoxConstraints(maxHeight: 400),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: Colors.grey.shade200),
+                // 패널을 TextField와 같은 탭 영역으로 묶어서, 키워드를 누르는 순간
+                // 검색창 포커스가 풀려 패널이 사라지고 탭이 무시되는 문제를 막습니다.
+                child: TextFieldTapRegion(
+                  child: Material(
+                    elevation: 6,
+                    borderRadius: BorderRadius.circular(16),
+                    color: Colors.white,
+                    child: Container(
+                      constraints: const BoxConstraints(maxHeight: 400),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.grey.shade200),
+                      ),
+                      child: _buildSuggestions(),
                     ),
-                    child: _buildSuggestions(),
                   ),
                 ),
               ),
@@ -1454,8 +1489,14 @@ class _SearchScreenState extends State<SearchScreen> {
     const int itemsPerPage = 8;
     final int pageCount = (items.length / itemsPerPage).ceil();
 
+    // 카드 높이를 고정해서 화면 폭이 넓어져도 카드가 아래 영역을 침범하지 않도록 합니다.
+    const double cardHeight = 190;
+    const double rowSpacing = 10;
+    final int rows = items.length > 4 ? 2 : 1;
+    final double sectionHeight = cardHeight * rows + rowSpacing * (rows - 1);
+
     return SizedBox(
-      height: 310,
+      height: sectionHeight,
       child: Row(
         children: [
           IconButton(
@@ -1490,13 +1531,15 @@ class _SearchScreenState extends State<SearchScreen> {
                     : items.length;
                 final pageItems = items.sublist(start, end);
 
-                return GridView.count(
-                  crossAxisCount: 4,
-                  mainAxisSpacing: 10,
-                  crossAxisSpacing: 10,
-                  childAspectRatio: 0.68,
+                return GridView(
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 4,
+                    mainAxisSpacing: rowSpacing,
+                    crossAxisSpacing: 10,
+                    mainAxisExtent: cardHeight,
+                  ),
+                  padding: EdgeInsets.zero,
                   physics: const NeverScrollableScrollPhysics(),
-                  shrinkWrap: true,
                   children: pageItems.map((recipe) {
                     return _searchResultCard(context, recipe, isShared);
                   }).toList(),
@@ -1707,6 +1750,8 @@ class _SearchScreenState extends State<SearchScreen> {
                               globalScrapList.add(recipe);
                             }
                           });
+                          // 검색 화면에서 한 스크랩도 DB에 저장
+                          saveScrapsToDb(widget.loginId);
                         },
                         child: Container(
                           padding: const EdgeInsets.all(4),
@@ -2611,12 +2656,7 @@ class _ScrapScreenState extends State<ScrapScreen> {
       );
     });
     if (widget.isLoggedIn && widget.loginId.isNotEmpty) {
-      try {
-        await FirebaseFirestore.instance
-            .collection('users')
-            .doc(widget.loginId)
-            .update({'scraps': globalScrapList});
-      } catch (_) {}
+      await saveScrapsToDb(widget.loginId);
     }
   }
 
@@ -2652,12 +2692,13 @@ class _ScrapScreenState extends State<ScrapScreen> {
               ),
             )
           : GridView.builder(
-              padding: const EdgeInsets.all(20),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2,
-                mainAxisSpacing: 15,
-                crossAxisSpacing: 15,
-                childAspectRatio: 0.75,
+              padding: const EdgeInsets.all(16),
+              // 화면 폭과 상관없이 카드가 작고 일정한 크기로 나오도록 고정
+              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                maxCrossAxisExtent: 170,
+                mainAxisExtent: 210,
+                mainAxisSpacing: 12,
+                crossAxisSpacing: 12,
               ),
               itemCount: globalScrapList.length,
               itemBuilder: (context, index) {
@@ -2734,7 +2775,12 @@ class _ScrapScreenState extends State<ScrapScreen> {
               padding: const EdgeInsets.all(10),
               child: Text(
                 recipe['recipe_food'] ?? recipe['name'] ?? '',
-                style: const TextStyle(fontWeight: FontWeight.bold),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                ),
               ),
             ),
           ],
@@ -2905,15 +2951,17 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
       }
     });
 
-    try {
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(widget.currentUserId)
-          .update({'scraps': globalScrapList});
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(isScrapped ? '스크랩이 해제되었습니다.' : '스크랩되었습니다!')),
-      );
-    } catch (_) {}
+    final saved = await saveScrapsToDb(widget.currentUserId);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          !saved
+              ? '스크랩 저장에 실패했습니다.'
+              : (isScrapped ? '스크랩이 해제되었습니다.' : '스크랩되었습니다!'),
+        ),
+      ),
+    );
   }
 
   Future<void> _submitReview() async {
@@ -4311,11 +4359,7 @@ class MyPageScreen extends StatelessWidget {
         children: [
           ListTile(
             contentPadding: const EdgeInsets.all(25),
-            leading: const CircleAvatar(
-              radius: 35,
-              backgroundColor: Colors.deepOrange,
-              child: Icon(Icons.person, color: Colors.white, size: 40),
-            ),
+            leading: UserProfileAvatar(loginId: loginId, radius: 35),
             title: Text(
               '$userName님 안녕하세요!',
               style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
@@ -4441,8 +4485,29 @@ class _LoginScreenState extends State<LoginScreen> {
       .collection('users');
   String _idErrorMessage = '';
   String _pwErrorMessage = '';
+  final FocusNode _pwFocusNode = FocusNode();
+  // Enter 키를 연타해도 로그인 요청이 중복으로 나가지 않도록 막는 플래그
+  bool _isLoggingIn = false;
 
-  void _login() async {
+  @override
+  void dispose() {
+    _idController.dispose();
+    _pwController.dispose();
+    _pwFocusNode.dispose();
+    super.dispose();
+  }
+
+  Future<void> _login() async {
+    if (_isLoggingIn) return;
+    _isLoggingIn = true;
+    try {
+      await _doLogin();
+    } finally {
+      _isLoggingIn = false;
+    }
+  }
+
+  Future<void> _doLogin() async {
     final id = _idController.text.trim();
     final pw = _pwController.text.trim();
     setState(() {
@@ -4536,6 +4601,15 @@ class _LoginScreenState extends State<LoginScreen> {
                 TextField(
                   controller: _idController,
                   decoration: const InputDecoration(labelText: '아이디'),
+                  textInputAction: TextInputAction.next,
+                  // 아이디에서 Enter: 비밀번호가 비어 있으면 비밀번호 칸으로, 아니면 바로 로그인
+                  onSubmitted: (_) {
+                    if (_pwController.text.trim().isEmpty) {
+                      _pwFocusNode.requestFocus();
+                    } else {
+                      _login();
+                    }
+                  },
                   onChanged: (t) {
                     if (_idErrorMessage.isNotEmpty)
                       setState(() => _idErrorMessage = '');
@@ -4551,8 +4625,12 @@ class _LoginScreenState extends State<LoginScreen> {
                 const SizedBox(height: 15),
                 TextField(
                   controller: _pwController,
+                  focusNode: _pwFocusNode,
                   obscureText: true,
                   decoration: const InputDecoration(labelText: '비밀번호'),
+                  textInputAction: TextInputAction.done,
+                  // 비밀번호에서 Enter: 로그인 버튼과 동일하게 동작
+                  onSubmitted: (_) => _login(),
                   onChanged: (t) {
                     if (_pwErrorMessage.isNotEmpty)
                       setState(() => _pwErrorMessage = '');

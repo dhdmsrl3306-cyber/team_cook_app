@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart'; 
+import 'package:image_picker/image_picker.dart';
+import 'user_doc.dart';
 
 class ProfileEditScreen extends StatefulWidget {
   final String loginId; 
@@ -52,6 +54,62 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
   bool _isSmsSent = false;      // 문자 발송 여부
   String _phoneMessage = '';
   Color _phoneMsgColor = Colors.red;
+
+  // 프로필 사진
+  final ImagePicker _picker = ImagePicker();
+  String _originalProfileImage = '';   // DB에 저장돼 있던 값
+  String _profileImage = '';           // 현재 화면에 보이는(저장될) 값, 빈 문자열이면 기본 아이콘
+
+  Future<void> _onProfileImageTap() async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Wrap(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_camera),
+              title: const Text('카메라로 촬영'),
+              onTap: () => Navigator.pop(context, 'camera'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library),
+              title: const Text('갤러리에서 선택'),
+              onTap: () => Navigator.pop(context, 'gallery'),
+            ),
+            if (_profileImage.isNotEmpty)
+              ListTile(
+                leading: const Icon(Icons.delete_outline, color: Colors.red),
+                title: const Text('기본 이미지로 변경', style: TextStyle(color: Colors.red)),
+                onTap: () => Navigator.pop(context, 'remove'),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (action == null) return;
+
+    if (action == 'remove') {
+      setState(() => _profileImage = '');
+      return;
+    }
+
+    try {
+      // 프로필은 작게 보여지고, users 문서(1MB 제한)에 스크랩 등과 함께 저장되므로
+      // 작게 줄여서 받습니다. (보통 수십 KB)
+      final picked = await _picker.pickImage(
+        source: action == 'camera' ? ImageSource.camera : ImageSource.gallery,
+        maxWidth: 256,
+        maxHeight: 256,
+        imageQuality: 60,
+      );
+      if (picked == null) return;
+      final bytes = await picked.readAsBytes();
+      if (!mounted) return;
+      setState(() => _profileImage = bytesToDataUri(bytes));
+    } catch (e) {
+      _showSnackBar('사진을 불러오지 못했습니다: $e', Colors.red);
+    }
+  }
 
   @override
   void initState() {
@@ -108,13 +166,11 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     }
 
     try {
-      final snapshot = await FirebaseFirestore.instance
-          .collection('users')
-          .where('login_id', isEqualTo: widget.loginId)
-          .limit(1)
-          .get();
+      // 직접 로그인(login_id)이든 자동 로그인(uid)이든 실제 회원 문서를 찾습니다.
+      final ref = await resolveUserDocRef(widget.loginId);
+      final doc = ref == null ? null : await ref.get();
 
-      if (snapshot.docs.isEmpty) {
+      if (doc == null || !doc.exists || doc.data() == null) {
         setState(() {
           _isLoading = false;
           _errorMessage = "Firestore에서 해당 아이디('${widget.loginId}')의 회원 정보를 찾을 수 없습니다.";
@@ -122,19 +178,20 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
         return;
       }
 
-      final doc = snapshot.docs.first;
       _documentId = doc.id; 
       
-      final data = doc.data();
+      final data = doc.data()!;
       _dbPassword = data['password'] ?? '';
       _originalPhoneNumber = data['phone_number'] ?? ''; 
       _originalNickname = data['nickname'] ?? ''; // 원본 저장
       _originalEmail = data['email'] ?? '';       // 원본 저장
+      _originalProfileImage = data[kProfileImageField]?.toString() ?? '';
 
       setState(() {
         _nicknameController.text = _originalNickname;
         _emailController.text = _originalEmail;
         _phoneController.text = _originalPhoneNumber;
+        _profileImage = _originalProfileImage;
         _isPhoneVerified = true; 
         _isLoading = false; 
       });
@@ -273,6 +330,11 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     updateData['password'] = newPwInput;
   }
 
+  // 프로필 사진을 바꿨거나 지웠을 때만 저장
+  if (_profileImage != _originalProfileImage) {
+    updateData[kProfileImageField] = _profileImage;
+  }
+
   try {
     await FirebaseFirestore.instance
         .collection('users')
@@ -382,25 +444,43 @@ Future<bool> _showConfirmDialog() async {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Center(
-                          child: Stack(
-                            children: [
-                              CircleAvatar(
-                                radius: 55,
-                                backgroundColor: Colors.grey.shade200,
-                                child: Icon(Icons.person, size: 65, color: Colors.grey.shade400),
-                              ),
-                              Positioned(
-                                bottom: 0,
-                                right: 0,
-                                child: CircleAvatar(
-                                  radius: 16,
-                                  backgroundColor: Colors.deepOrange,
-                                  child: const Icon(Icons.camera_alt, size: 16, color: Colors.white),
+                          child: GestureDetector(
+                            onTap: _onProfileImageTap,
+                            child: Stack(
+                              children: [
+                                Builder(builder: (context) {
+                                  final image = profileImageProvider(_profileImage);
+                                  return CircleAvatar(
+                                    radius: 55,
+                                    backgroundColor: Colors.grey.shade200,
+                                    backgroundImage: image,
+                                    child: image == null
+                                        ? Icon(Icons.person, size: 65, color: Colors.grey.shade400)
+                                        : null,
+                                  );
+                                }),
+                                Positioned(
+                                  bottom: 0,
+                                  right: 0,
+                                  child: CircleAvatar(
+                                    radius: 16,
+                                    backgroundColor: Colors.deepOrange,
+                                    child: const Icon(Icons.camera_alt, size: 16, color: Colors.white),
+                                  ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
                         ),
+                        if (_profileImage != _originalProfileImage) ...[
+                          const SizedBox(height: 8),
+                          const Center(
+                            child: Text(
+                              '변경사항 저장하기를 눌러야 프로필 사진이 저장됩니다.',
+                              style: TextStyle(fontSize: 12, color: Colors.deepOrange),
+                            ),
+                          ),
+                        ],
                         const SizedBox(height: 30),
 
                         // [기능 추가: 닉네임 UI 및 중복확인 버튼]
