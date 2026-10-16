@@ -3216,7 +3216,6 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
 
   Widget _buildReviewCard(Map<String, dynamic> review, String reviewId) {
     final authorId = review['authorId']?.toString() ?? '';
-    final authorName = review['authorName']?.toString() ?? authorId;
     final content = review['content']?.toString() ?? '';
     final rating = review['rating'] is int
         ? review['rating'] as int
@@ -3235,18 +3234,12 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
         children: [
           Row(
             children: [
-              CircleAvatar(
-                radius: 16,
-                backgroundColor: Colors.deepOrange.shade100,
-                child: Text(
-                  authorName.isNotEmpty ? authorName[0].toUpperCase() : '?',
-                  style: const TextStyle(color: Colors.white),
-                ),
-              ),
+              UserProfileAvatar(loginId: authorId, radius: 16),
               const SizedBox(width: 10),
               Expanded(
-                child: Text(
-                  authorName,
+                child: UserNicknameText(
+                  loginId: authorId,
+                  fallback: '알 수 없는 사용자',
                   style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
               ),
@@ -4106,7 +4099,6 @@ class _ReviewListScreenState extends State<ReviewListScreen> {
 
   Widget _buildReviewItem(BuildContext context, Map<String, dynamic> review) {
     final authorId = review['authorId']?.toString() ?? '';
-    final authorName = review['authorName']?.toString() ?? authorId;
     final content = review['content']?.toString() ?? '';
     final rating = review['rating'] is int
         ? review['rating'] as int
@@ -4203,20 +4195,16 @@ class _ReviewListScreenState extends State<ReviewListScreen> {
               const SizedBox(height: 10),
               Row(
                 children: [
-                  CircleAvatar(
-                    radius: 14,
-                    backgroundColor: Colors.deepOrange.shade100,
-                    child: Text(
-                      authorName.isNotEmpty ? authorName[0].toUpperCase() : '?',
-                      style: const TextStyle(color: Colors.white, fontSize: 12),
-                    ),
-                  ),
+                  UserProfileAvatar(loginId: authorId, radius: 14),
                   const SizedBox(width: 8),
-                  Text(
-                    authorName,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 14,
+                  Flexible(
+                    child: UserNicknameText(
+                      loginId: authorId,
+                      fallback: '알 수 없는 사용자',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
                     ),
                   ),
                   const SizedBox(width: 8),

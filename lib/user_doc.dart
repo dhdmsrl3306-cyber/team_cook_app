@@ -102,3 +102,48 @@ class UserProfileAvatar extends StatelessWidget {
     );
   }
 }
+
+/// users 문서를 실시간으로 구독해서 닉네임을 보여주는 텍스트.
+/// 닉네임을 못 찾으면(탈퇴 등) [fallback] 을 보여줍니다.
+/// 예전에 쓴 댓글은 작성자가 '아이디'로 저장돼 있어도, 여기서 닉네임으로 바꿔서 보여줍니다.
+class UserNicknameText extends StatelessWidget {
+  final String loginId;
+  final String fallback;
+  final TextStyle? style;
+
+  const UserNicknameText({
+    super.key,
+    required this.loginId,
+    this.fallback = '',
+    this.style,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<DocumentReference<Map<String, dynamic>>?>(
+      future: resolveUserDocRef(loginId),
+      builder: (context, refSnap) {
+        final ref = refSnap.data;
+        if (ref == null) {
+          // 조회 중이거나 못 찾은 경우: 아이디가 잠깐 보이지 않도록 대체 문구만 사용
+          return Text(
+            refSnap.connectionState == ConnectionState.done ? fallback : '',
+            style: style,
+            overflow: TextOverflow.ellipsis,
+          );
+        }
+        return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: ref.snapshots(),
+          builder: (context, snap) {
+            final nick = snap.data?.data()?['nickname']?.toString().trim() ?? '';
+            return Text(
+              nick.isNotEmpty ? nick : fallback,
+              style: style,
+              overflow: TextOverflow.ellipsis,
+            );
+          },
+        );
+      },
+    );
+  }
+}
