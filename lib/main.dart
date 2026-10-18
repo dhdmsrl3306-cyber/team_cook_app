@@ -2709,6 +2709,39 @@ class _ScrapScreenState extends State<ScrapScreen> {
     );
   }
 
+  // 스크랩 카드에 보여줄 이미지 주소를 홈/검색/상세 화면과 같은 규칙으로 계산합니다.
+  // (기존에는 imageUrl/url 필드만 그대로 써서, 깃허브에 사진이 있는 기본 레시피들의 이미지가 안 떴습니다.)
+  // 1) base64로 첨부한 사진이 있으면 최우선 사용
+  // 2) 공유 레시피(recipe_list)는 저장돼 있는 imageUrl/url 그대로 사용
+  // 3) 기본 레시피(recipes)는 recipeId 기반 깃허브 주소 사용
+  String _resolveScrapImageUrl(Map<String, dynamic> recipe) {
+    const githubBaseUrl =
+        'https://raw.githubusercontent.com/parkchankyu92-wq/recipe-images/main/';
+
+    final imageUrlField = recipe['imageUrl']?.toString().trim() ?? '';
+    final urlField = recipe['url']?.toString().trim() ?? '';
+    final storedImageUrl = imageUrlField.isNotEmpty ? imageUrlField : urlField;
+
+    if (storedImageUrl.startsWith('data:image')) return storedImageUrl;
+
+    // source 태그가 없는 예전 스크랩 데이터는 작성자(ownerId) 유무로 공유 레시피인지 추정합니다.
+    final source = recipe['source']?.toString();
+    final isSharedRecipe = source == 'recipe_list' ||
+        (source == null &&
+            (recipe['ownerId']?.toString().isNotEmpty ?? false));
+
+    if (isSharedRecipe && storedImageUrl.isNotEmpty) return storedImageUrl;
+
+    final recipeIdField = recipe['recipeId']?.toString() ?? '';
+    final recipeId = recipeIdField.isNotEmpty
+        ? recipeIdField
+        : (recipe['id']?.toString() ?? '');
+    if (recipeId.isNotEmpty) return '$githubBaseUrl$recipeId.png';
+
+    // 그 외에는 저장된 주소가 있으면 사용하고, 없으면 회색 기본 이미지가 표시됩니다.
+    return storedImageUrl;
+  }
+
   Widget _buildScrapCard(BuildContext context, Map<String, dynamic> recipe) {
     return InkWell(
       onTap: () async {
@@ -2741,13 +2774,7 @@ class _ScrapScreenState extends State<ScrapScreen> {
                     borderRadius: const BorderRadius.vertical(
                       top: Radius.circular(15),
                     ),
-                    child: buildRecipeImage(
-                      (recipe['imageUrl']?.toString().isNotEmpty ?? false)
-                          ? recipe['imageUrl'].toString()
-                          : (recipe['url']?.toString().isNotEmpty ?? false)
-                              ? recipe['url'].toString()
-                              : 'https://picsum.photos/400/300',
-                    ),
+                    child: buildRecipeImage(_resolveScrapImageUrl(recipe)),
                   ),
                   Positioned(
                     top: 8,
