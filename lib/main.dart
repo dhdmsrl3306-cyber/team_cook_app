@@ -280,30 +280,49 @@ class OwnedCouponsScreen extends StatelessWidget {
   const OwnedCouponsScreen({super.key, required this.loginId});
 
   Future<List<QueryDocumentSnapshot>> _fetchOwnedCoupons() async {
-    // 먼저 사용자 문서 찾기
-    final userQuery = await FirebaseFirestore.instance.collection('users').where('login_id', isEqualTo: loginId).limit(1).get();
+    // 1. 사용자 문서 찾기
+    final userQuery = await FirebaseFirestore.instance
+        .collection('users')
+        .where('login_id', isEqualTo: loginId)
+        .limit(1)
+        .get();
     if (userQuery.docs.isEmpty) return [];
     final userDocId = userQuery.docs.first.id;
 
-    // 두 가지 쿼리 실행: userLoginId 기준과 userDocId 기준
-    final q1 = FirebaseFirestore.instance.collection('user_coupons').where('userLoginId', isEqualTo: loginId).get();
-    final q2 = FirebaseFirestore.instance.collection('user_coupons').where('userDocId', isEqualTo: userDocId).get();
+    // 2. 두 가지 쿼리 실행: userLoginId 기준과 userDocId 기준
+    final q1 = FirebaseFirestore.instance
+        .collection('user_coupons')
+        .where('userLoginId', isEqualTo: loginId)
+        .get();
+    final q2 = FirebaseFirestore.instance
+        .collection('user_coupons')
+        .where('userDocId', isEqualTo: userDocId)
+        .get();
 
     final results = await Future.wait([q1, q2]);
-    final allDocs = <QueryDocumentSnapshot>{};
+
+    // 3. 문서 ID(doc.id)를 Key로 사용하여 중복 제거
+    final docMap = <String, QueryDocumentSnapshot>{};
     for (final r in results) {
-      allDocs.addAll(r.docs);
+      for (final doc in r.docs) {
+        docMap[doc.id] = doc; // 동일한 doc.id가 들어오면 덮어쓰므로 중복 제거됨
+      }
     }
 
-    final list = allDocs.toList();
-    // 정렬: acquiredAt 내림차순
+    final list = docMap.values.toList();
+
+    // 4. 정렬: acquiredAt 내림차순
     list.sort((a, b) {
-      final ta = a.data() is Map && (a.data() as Map).containsKey('acquiredAt') ? (a.data() as Map)['acquiredAt'] : null;
-      final tb = b.data() is Map && (b.data() as Map).containsKey('acquiredAt') ? (b.data() as Map)['acquiredAt'] : null;
+      final aData = a.data() as Map<String, dynamic>?;
+      final bData = b.data() as Map<String, dynamic>?;
+
+      final ta = aData?['acquiredAt'] as Timestamp?;
+      final tb = bData?['acquiredAt'] as Timestamp?;
+
       if (ta == null && tb == null) return 0;
       if (ta == null) return 1;
       if (tb == null) return -1;
-      return (tb as Timestamp).compareTo(ta as Timestamp);
+      return tb.compareTo(ta);
     });
 
     return list;
