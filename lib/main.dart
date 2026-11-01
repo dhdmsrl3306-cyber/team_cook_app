@@ -47,6 +47,7 @@ Widget buildRecipeImage(
         fit: fit,
         width: width,
         height: height,
+        gaplessPlayback: true, // ⭐ base64 이미지 갱신 시 깜빡임 방지
         errorBuilder: (_, __, ___) => placeholder,
       );
     } catch (_) {
@@ -59,6 +60,16 @@ Widget buildRecipeImage(
     fit: fit,
     width: width,
     height: height,
+    gaplessPlayback: true, // ⭐ 핵심: 이미지가 변경되거나 슬라이드될 때 하얗게 깜빡이는 현상 방지
+    loadingBuilder: (context, child, loadingProgress) {
+      if (loadingProgress == null) return child;
+      // 로딩 중일 때 깜빡임을 줄이기 위해 연한 회색 배경을 유지하거나 기존 위젯 유지
+      return Container(
+        width: width,
+        height: height,
+        color: Colors.grey.shade100,
+      );
+    },
     errorBuilder: (_, __, ___) => placeholder,
   );
 }
